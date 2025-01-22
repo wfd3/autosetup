@@ -741,8 +741,6 @@ def main():
     commentary("Installation complete")
 
 if __name__ == '__main__':
-    main()
-    '''
     try:
         main()
     except KeyboardInterrupt:
@@ -751,4 +749,3 @@ if __name__ == '__main__':
         if '--debug' in sys.argv:
             raise
         bail(f"Unexpected error: {e}")
-    '''
