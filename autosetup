@@ -136,6 +136,38 @@ def root_check():
     if os.geteuid() != 0 and not args.dryrun:
         bail("This script must be run as root")
 
+def filter_comments(line: str) -> str:
+    """Remove comments but preserve # characters in quoted strings."""
+
+    if not line:
+        return line
+    
+    result = []    
+    in_quote = False
+    quote_char = None
+    i = 0
+    
+    while i < len(line):
+        char = line[i]
+        
+        # Handle quotes
+        if char in '"\'':
+            if not in_quote:
+                in_quote = True
+                quote_char = char
+            elif char == quote_char:
+                in_quote = False
+                quote_char = None
+                
+        # Handle comment outside of quotes
+        elif char == '#' and not in_quote:
+            break
+            
+        result.append(char)
+        i += 1
+    
+    return ''.join(result).rstrip()
+
 # ----------------------------------------------------------------------------
 # Installed package database
 # ----------------------------------------------------------------------------
@@ -162,7 +194,11 @@ def parse_package_entry(name: str, lines: List[str]) -> PackageAttributes:
     pkg.apt_package = name # Default apt package name
     
     for line in lines:
-        directive_type, content = line.split(':', 1)
+        try:
+            directive_type, content = line.split(':', 1)
+        except ValueError:
+            bail(f"Error parsing directive: {line}")
+
         directive_type = directive_type.strip()
         content = content.strip()
         
@@ -203,8 +239,8 @@ def parse_package_list(filename: Path) -> PackageList:
         for line in f:
             line = line.rstrip()
 
-            # Skip blank lines and lines whos first non-whitespace character is a comment            
-            if not line or line.lstrip().startswith('#'):
+            line = filter_comments(line)
+            if not line:
                 continue
 
             # Handle line continuation
@@ -705,6 +741,8 @@ def main():
     commentary("Installation complete")
 
 if __name__ == '__main__':
+    main()
+    '''
     try:
         main()
     except KeyboardInterrupt:
@@ -713,3 +751,4 @@ if __name__ == '__main__':
         if '--debug' in sys.argv:
             raise
         bail(f"Unexpected error: {e}")
+    '''
