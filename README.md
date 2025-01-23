@@ -68,6 +68,9 @@ This example:
 - `skip`: Skip this package
 - `force_apt_update`: Force APT database update
 - `no_apt`: Skip APT installation phase
+- `prescript_run_once`: Run the prescript only once
+- `postscript_run_once`: Run the postscript only once
+- `script_run_once`: Run the pre- and postscript only once
 
 ### Available Directives
 

@@ -17,16 +17,18 @@ from typing import List, Dict, Set, Tuple, Optional
 
 VERSION = "1.1"
 
+SEMAPHORE_DIR = "/var/run/autosetup/"
+
 # Package data structures
 @dataclass
 class PackageAttributes:
-    name:            str
+    name:            str = None
     install_method:  str = 'apt'  # 'apt' or 'deb'
     url:             Optional[str] = None    # for deb downloads
     repositories:    Set[str] = field(default_factory=set)
     sources:         List[tuple[str, str]] = field(default_factory=list)  # [(filename, content),...]
-    pre_scripts:     List[str] = field(default_factory=list)
-    post_scripts:    List[str] = field(default_factory=list)
+    pre_script:      str = None
+    post_script:     str = None
     flags:           Set[str] = field(default_factory=set)
     downloaded_file: Optional[str] = None
     apt_package:     str = None
@@ -168,16 +170,42 @@ def filter_comments(line: str) -> str:
     
     return ''.join(result).rstrip()
 
+# Semaphores
+
+def semaphore_name(package: PackageAttributes, phase: str) -> str:
+    """Return the semaphore filename for a package."""
+    path = Path(SEMAPHORE_DIR).joinpath(package.name)
+    path = path.with_suffix(f'.{phase}')
+    return path
+
+def semaphore_create(package: PackageAttributes, phase: str):
+    """Create an semaphore file."""
+    path = semaphore_name(package, phase)    
+
+    if args.dryrun:
+        info(f"Would create semaphore file: {path}")
+        return
+    
+    path.parent.mkdir(parents=True, exist_ok=True)  # Create all parent directories
+    path.touch()
+
+def semaphore_exists(package: PackageAttributes, phase: str) -> bool:
+    """Check if a semaphore exists."""
+    return semaphore_name(package, phase).is_file()
+
 # ----------------------------------------------------------------------------
 # Installed package database
 # ----------------------------------------------------------------------------
 
 def load_installed_packages() -> Set[str]:
     """Load the list of installed packages."""
+
+    global installed_packages
+
     try:
         result = subprocess.run(['apt', 'list', '--installed'],
                              capture_output=True, text=True, check=True)
-        return {p.split('/')[0] for p in result.stdout.splitlines()[1:] if '/' in p}
+        installed_packages = {p.split('/')[0] for p in result.stdout.splitlines()[1:] if '/' in p}
     except subprocess.CalledProcessError:
         bail("Error getting list of installed packages")
 
@@ -190,6 +218,7 @@ def is_package_installed(package: str) -> bool:
 # ----------------------------------------------------------------------------
 def parse_package_entry(name: str, lines: List[str]) -> PackageAttributes:
     """Parse a single package entry and return its attributes."""
+    
     pkg = PackageAttributes(name=name)
     pkg.apt_package = name # Default apt package name
     
@@ -217,9 +246,9 @@ def parse_package_entry(name: str, lines: List[str]) -> PackageAttributes:
                     filename = f"/etc/apt/sources.list.d/{filename}"
                 pkg.sources.append((filename, source_content))
             case _ if directive_type == 'script' or directive_type == 'prescript':
-                pkg.pre_scripts.append(content)
+                pkg.pre_script = content
             case _ if directive_type.startswith('post'):
-                pkg.post_scripts.append(content)
+                pkg.post_script = content
             case 'apt':
                 pkg.apt_package = content
             case _:
@@ -319,7 +348,7 @@ def format_package_list(packages: List[str], min_spacing: int = 2) -> str:
 
     return "\n".join(output)
 
-def pretty_print_scripts(script: str):
+def pretty_print_script(script: str):
     """Format script commands for display."""
     print("    " + script)
 
@@ -327,32 +356,54 @@ def pretty_print_scripts(script: str):
 # Package Installation Functions
 # ----------------------------------------------------------------------------
 
-def run_scripts(scripts: List[Tuple[str, str]], phase: str = ""):
+def run_script(packages: PackageList, phase: str = ""):
     """Run a list of (script, package) pairs."""
 
+    have_script = False
     commentary(f"Running {phase} scripts")
-    if not scripts: 
+    
+    for package in packages:
+        script = None
+        if phase == "pre-install":
+            script = package.pre_script
+            run_once = "prescript_run_once" in package.flags or "script_run_once" in package.flags
+        else:
+            script = package.post_script
+            run_once = "postscript_run_once" in package.flags or "script_run_once" in package.flags
+
+        if not script:
+            continue
+
+        have_script = True
+       
+        if run_once and semaphore_exists(package, phase):
+            info(f"Skipping {phase} script for {package.name} (already run)")
+            continue
+
+        if args.dryrun:
+            info(f"Would run {phase} script for {package.name}:")
+            if args.debug:
+                pretty_print_script(script)
+            continue
+            
+        info(f"Running {phase} script for {package.name}:")
+        if args.debug:
+            pretty_print_script(script)
+        try:
+            subprocess.run(script, **run_opts, shell=True, check=True)
+            success(f"Completed {phase} script for {package.name}")
+            if run_once:
+                semaphore_create(package, phase)
+        except subprocess.CalledProcessError as result:
+            error(f"Error running {phase} script:")
+            pretty_print_script(script)
+            error(f"Return code: {result.returncode}")
+            bail(f"Script error for package {package.name}")
+
+    if not have_script: 
         info(f"No {phase} scripts to run")
         return
 
-    for script, package in scripts:
-        if args.dryrun:
-            info(f"Would run {phase} script for {package}:")
-            if args.debug:
-                pretty_print_scripts(script)
-            continue
-            
-        info(f"Running {phase} script for {package}:")
-        if args.debug:
-            pretty_print_scripts(script)
-        try:
-            subprocess.run(script, **run_opts, shell=True, check=True)
-            success(f"Completed {phase} script for {package}")
-        except subprocess.CalledProcessError as result:
-            error(f"Error running {phase} script:")
-            pretty_print_scripts(script)
-            error(f"Return code: {result.returncode}")
-            bail(f"Script error for package {package}")
 
 def download_packages(to_download: PackageList) -> PackageList:
     """Download packages from URLs.
@@ -398,57 +449,61 @@ def download_packages(to_download: PackageList) -> PackageList:
 
     return PackageList(packages=downloaded_files)
 
-def add_repositories(repos: Set[str]) -> bool:
+def add_repositories(packages: PackageList) -> bool:
     """Add repositories. Returns True if updates needed."""
 
     commentary(f"Adding repositories")
-    if not repos:
-        info("No repositories to add")
+    packages_with_repos = [pkg for pkg in packages if pkg.sources]
+    if not packages_with_repos:
+        info("No repos to add")
         return False
-
+      
     update_needed = False
 
-    for repo in repos:
-        if args.dryrun:
-            info(f"Would add repository: {repo}")
-            continue
+    for package in packages_with_repos: 
+        for repo in package.repositories:
+            if args.dryrun:
+                info(f"Would add repository: {repo}")
+                continue
 
-        try:
-            info(f"Adding repository: {repo}")
-            subprocess.run(['add-apt-repository', '-y', repo], **run_opts, check=True)
-            success(f"Added repository: {repo}")
-            update_needed = True
-        except subprocess.CalledProcessError:
-            bail(f"Error adding repository: {repo}")
+            try:
+                info(f"Adding repository: {repo}")
+                subprocess.run(['add-apt-repository', '-y', repo], **run_opts, check=True)
+                success(f"Added repository: {repo}")
+                update_needed = True
+            except subprocess.CalledProcessError:
+                bail(f"Error adding repository: {repo}")
 
     return update_needed
 
-def add_sources(sources: Dict[str, str]) -> bool:
+def add_sources(packages: PackageList) -> bool:
     """Add sources to /apt/sources.list.d/... Returns True if update needed."""
 
     commentary(f"Adding package sources")
-    if not sources:
-        info(f"No sources to add")
+    packages_with_sources = [pkg for pkg in packages if pkg.sources]
+    if not packages_with_sources:
+        info("No sources to add")
         return False
-    
+      
     update_needed = False
 
-    for filename, content in sources:
-        if args.dryrun:
-            info(f"Would add '{content}' to {filename}")
-            continue
+    for package in packages_with_sources: 
+        for filename, content in package.sources:
+            if args.dryrun:
+                info(f"Would add '{content}' to {filename}")
+                continue
 
-        try:
-            update_needed = True # Assume an update is needed even if the file exists
-            if not os.path.exists(filename):
-                info(f"Adding source file: {filename}")
-                with open(filename, 'w') as f:
-                    f.write(f"{content}\n")
-                success(f"Added package source in {filename}")
-            else:
-                warning(f"'{filename}' exists, skipping")
-        except Exception as e:
-            bail(f"Error adding source to {filename}: {e}")
+            try:
+                update_needed = True # Assume an update is needed even if the file exists
+                if not os.path.exists(filename):
+                    info(f"Adding source file: {filename}")
+                    with open(filename, 'w') as f:
+                        f.write(f"{content}\n")
+                    success(f"Added package source in {filename}")
+                else:
+                    warning(f"'{filename}' exists, skipping")
+            except Exception as e:
+                bail(f"Error adding source to {filename}: {e}")
 
     return update_needed
 
@@ -514,7 +569,7 @@ def update_apt_database(run: bool):
         bail("Error updating package database")
 
 # ----------------------------------------------------------------------------
-# Instal a PackageList 
+# Install a PackageList 
 # ----------------------------------------------------------------------------
 def apply_cmdline_filters(pkg: PackageAttributes) -> bool:
     """ Apply command line --skip and --only flags.
@@ -549,7 +604,7 @@ def install_package_list(pkg_list: PackageList):
     apt_update_needed = False
 
     # Collect all repositories, sources, scripts, etc. 
-    all_repos = set()
+    all_repos = []
     all_sources = []
     pre_scripts = []
     post_scripts = []
@@ -563,6 +618,7 @@ def install_package_list(pkg_list: PackageList):
 
     for pkg in pkg_list:
 
+        # Apply command line filters, save data to tell the user what we did and why
         if apply_cmdline_filters(pkg):
             cmdline.append(pkg.name)
             continue
@@ -577,13 +633,17 @@ def install_package_list(pkg_list: PackageList):
             flag.append(pkg.name)
             continue
 
+        # Sort out which packages have pre_scripts, post_scripts, urls to download, etc.
         if 'force_apt_update' in pkg.flags:
             apt_update_needed = True
 
-        all_repos.update(pkg.repositories)
-        all_sources.extend(pkg.sources)
-        pre_scripts.extend((script, pkg.name) for script in pkg.pre_scripts)
-        post_scripts.extend((script, pkg.name) for script in pkg.post_scripts)
+        all_repos.append(pkg)
+        all_sources.append(pkg)
+
+        if (pkg.pre_script):
+            pre_scripts.append(pkg)
+        if (pkg.post_script):
+            post_scripts.append(pkg)
         if pkg.url and pkg.install_method == 'deb':
             urls.append(pkg)
         if pkg.install_method == 'apt' and 'no_apt' not in pkg.flags: 
@@ -599,32 +659,22 @@ def install_package_list(pkg_list: PackageList):
     if already_installed:
         info(f"Skipping already installed packages:")
         print(f"{format_package_list(already_installed)}")
-
+    
     # Any packages left?
     if not any([all_repos, all_sources, pre_scripts, post_scripts, urls, apt_packages]):
         info("No packages to install")
         return
     
-    # Add sources if needed
+    ### Start the installation process
+
     apt_update_needed |= add_sources(all_sources)
-
-    # Add repositories if needed
     apt_update_needed |= add_repositories(all_repos)
-    
-    # run pre-install scripts
-    run_scripts(pre_scripts, "pre-install")
-
+    run_script(pre_scripts, "pre-install")
     update_apt_database(apt_update_needed)
-
-    # Download and install .deb packages
     downloads = download_packages(urls)
     install_deb_packages(downloads)
-
-    # Install apt packages
     install_apt_packages(apt_packages)
-
-    # Collect and run post-install scripts
-    run_scripts(post_scripts, "post-install")
+    run_script(post_scripts, "post-install")
 
 def run_installation(packages: PackageList):
     """Install all packages in the given list."""
@@ -697,13 +747,13 @@ def parse_arguments() -> argparse.Namespace:
     
     args = parser.parse_args()
 
-    # Clean up arguments
+    # Parse out comma separated arguments into lists
     args.skip = clean_args(args.skip)
     args.skip_flags = clean_args(args.skip_flags)
     args.only_flags = clean_args(args.only_flags)
     args.only = clean_args(args.only)
 
-    # Set up subprocess runargs based on quiet option
+    # Redirect subprocess output?
     global run_opts
     run_opts = {}
     if args.quiet:
@@ -720,9 +770,8 @@ def parse_arguments() -> argparse.Namespace:
     return args
 
 def main():
-    global installed_packages, temp_dir, preserve_working_dir
 
-    args = parse_arguments()
+    parse_arguments()
 
     installed_packages = load_installed_packages()
     package_entries = parse_package_list(args.filename)

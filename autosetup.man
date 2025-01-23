@@ -108,7 +108,16 @@ Skip this package
 Force APT database update after installation
 .TP
 .B no_apt
-Do not assume that the package name maps to an APT package to install.  
+Do not assume that the package name maps to an APT package to install.
+.TP
+.B prescript_run_once
+Run the prescript only once.
+.TP
+.B postscript_run_once
+Run the postscript only once.  
+.TP
+.B script_run_once
+Run both the pre- and post-scripts only once.
 .SH EXIT STATUS
 .TP
 .B 0
