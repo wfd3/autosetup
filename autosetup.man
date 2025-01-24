@@ -203,9 +203,11 @@ Success
 .TP
 .B 1
 Error occurred
-.SH AUTHOR
-Written by [Your name]
-.SH BUGS
-Report bugs to [Your bug reporting address]
-.SH COPYRIGHT
-Copyright © 2024 [Your copyright notice]
+.SH FILES
+Packages marked as
+.B run_once
+place a semaphore file in 
+.B
+/var/run/autosetup
+
+To force a run_once script to run again, remove the associated file in that directory.

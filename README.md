@@ -34,18 +34,13 @@ The script must be run as root unless using --dryrun mode:
 
 Here's an example that demonstrates the various package list formats:
 
-    # Install emacs
-    emacs
-    
-    # Install atop
-    atop
-    
-    # Install tcsh, add tcsh to /etc/shells
-    tcsh:
+    emacs     # Install emacs
+    atop      # Install atop
+
+    tcsh:     # Install tcsh, and add it to /etc/shells
       postscript: echo "/bin/tcsh" >> /etc/shells
-    
-    # Install code from a downloaded .deb file
-    code:
+
+    code:     # Install code from a downloaded .deb file
       deb: https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64
     
     # Clean up from installation -- note that the 'no_apt' flag tells autosetup to not try 
@@ -56,7 +51,7 @@ Here's an example that demonstrates the various package list formats:
 
 This example:
 - Installs emacs and atop via APT with default settings
-- Installs tcsh via APT and adds it to /etc/shells
+- Installs tcsh via APT and then runs a script to add it to /etc/shells
 - Downloads and installs Visual Studio Code from the official .deb package
 - Runs apt autoremove after all installations complete
 
@@ -99,3 +94,8 @@ Install specific packages:
 Install packages with specific flags:
 
     sudo ./autosetup --only-flags server packages.list
+
+## Run-once Scripts
+To ensure that scripts flagged as `run_once` only do run one time, ``autosetup`` places a semaphore file in `/var/run/autosetup`.  It checks for the existance of that file each time it encounters a pre- or post-script in a package declaration, and if it exists, it will not run the associated script.  
+
+To force `autosetup` to run a script again, delete the associated file in `/var/run/autosetup`.  **Note**: Pacakge scripts may not be written to correctly run more than once; doing so may lead to unknown errors.

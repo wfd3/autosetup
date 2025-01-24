@@ -32,6 +32,9 @@ class PackageAttributes:
     flags:           Set[str] = field(default_factory=set)
     downloaded_file: Optional[str] = None
     apt_package:     str = None
+
+    def has_flags(self, *flags: str) -> bool:
+        return self.flags & set(flags)
     
 @dataclass
 class PackageList:
@@ -44,21 +47,19 @@ class PackageList:
        return (not self.packages)
    
     def get_packages_with_flags(self, *flags: str) -> 'PackageList':
-        flag_set = set(flags)
         matching_packages = []
         
         for pkg in self.packages:
-            if pkg.flags & flag_set:
+            if pkg.has_flags(flags):
                 matching_packages.append(pkg)
         
         return PackageList(packages=matching_packages)
    
     def get_packages_without_flags(self, *flags: str) -> 'PackageList':
-        flag_set = set(flags)
         matching_packages = []
        
         for pkg in self.packages:
-            if not pkg.flags & flag_set:
+            if not pkg.has_flags(flags):
                 matching_packages.append(pkg)
 
         return PackageList(packages=matching_packages)
@@ -122,6 +123,7 @@ def make_working_directory():
 
 def bail(message: str = None, exit_code: int = 1):
     """Exit the program with optional error message."""
+   
     if message:
         error(message)
 
@@ -135,6 +137,7 @@ def bail(message: str = None, exit_code: int = 1):
 
 def root_check():
     """Verify root privileges when not in dry-run mode."""
+    
     if os.geteuid() != 0 and not args.dryrun:
         bail("This script must be run as root")
 
@@ -170,16 +173,20 @@ def filter_comments(line: str) -> str:
     
     return ''.join(result).rstrip()
 
+# ----------------------------------------------------------------------------
 # Semaphores
+# ----------------------------------------------------------------------------
 
 def semaphore_name(package: PackageAttributes, phase: str) -> str:
     """Return the semaphore filename for a package."""
+   
     path = Path(SEMAPHORE_DIR).joinpath(package.name)
     path = path.with_suffix(f'.{phase}')
     return path
 
 def semaphore_create(package: PackageAttributes, phase: str):
     """Create an semaphore file."""
+   
     path = semaphore_name(package, phase)    
 
     if args.dryrun:
@@ -187,17 +194,21 @@ def semaphore_create(package: PackageAttributes, phase: str):
         return
     
     path.parent.mkdir(parents=True, exist_ok=True)  # Create all parent directories
-    path.touch()
+    try:
+      path.touch()
+    except OSError as e:
+        bail(f"Could not create file {path}: {e}")
 
 def semaphore_exists(package: PackageAttributes, phase: str) -> bool:
     """Check if a semaphore exists."""
+   
     return semaphore_name(package, phase).is_file()
 
 # ----------------------------------------------------------------------------
 # Installed package database
 # ----------------------------------------------------------------------------
 
-def load_installed_packages() -> Set[str]:
+def load_installed_packages():
     """Load the list of installed packages."""
 
     global installed_packages
@@ -211,110 +222,98 @@ def load_installed_packages() -> Set[str]:
 
 def is_package_installed(package: str) -> bool:
     """Check if a package is already installed."""
+  
     return package in installed_packages
 
 # ----------------------------------------------------------------------------
 # Package Processing Functions
 # ----------------------------------------------------------------------------
-def parse_package_entry(name: str, lines: List[str]) -> PackageAttributes:
-    """Parse a single package entry and return its attributes."""
-    
-    pkg = PackageAttributes(name=name)
-    pkg.apt_package = name # Default apt package name
-    
-    for line in lines:
-        try:
-            directive_type, content = line.split(':', 1)
-        except ValueError:
-            bail(f"Error parsing directive: {line}")
 
-        directive_type = directive_type.strip()
-        content = content.strip()
-        
-        match directive_type:
-            case 'flags':
-                flags = {f.strip().lower() for f in content.split(',')}
-                pkg.flags.update(flags)
-            case 'deb':
-                pkg.install_method = 'deb'
-                pkg.url = content
-            case 'repo':
-                pkg.repositories.add(content)
-            case 'source':
-                filename, source_content = content.strip().split(None, 1)
-                if not filename.startswith('/etc/apt/sources.list.d/'):
-                    filename = f"/etc/apt/sources.list.d/{filename}"
-                pkg.sources.append((filename, source_content))
-            case _ if directive_type == 'script' or directive_type == 'prescript':
-                pkg.pre_script = content
-            case _ if directive_type.startswith('post'):
-                pkg.post_script = content
-            case 'apt':
-                pkg.apt_package = content
-            case _:
-                bail(f"Unknown directive type: {directive_type}")
-                
-    return pkg
+def parse_directive(line: str, pkg: PackageAttributes) -> bool:
+    """Parse a single directive line and update package attributes."""
+   
+    try:
+        dtype, content = line.split(':', 1)
+    except ValueError:
+        return False
+
+    dtype = dtype.strip().lower()
+    content = content.strip()
     
+    match dtype:
+        case 'flags':
+            pkg.flags.update(f.strip().lower() for f in content.split(','))
+        case 'deb':
+            pkg.install_method = 'deb'
+            pkg.url = content
+        case 'repo':
+            pkg.repositories.add(content)
+        case 'source':
+            try:
+                fname, src = content.split(None, 1)
+                if not fname.startswith('/etc/apt/sources.list.d/'):
+                    fname = f"/etc/apt/sources.list.d/{fname}"
+                pkg.sources.append((fname, src))
+            except ValueError:
+                bail(f"Invalid source format: {content}")
+        case 'script' | 'prescript':
+            pkg.pre_script = content
+        case _ if dtype.startswith('post'):
+            pkg.post_script = content
+        case 'apt':
+            pkg.apt_package = content
+        case _:
+            return False
+    return True
+
 def parse_package_list(filename: Path) -> PackageList:
-    """Parse package list file into PackageList structure."""
+    """Parse package list file into list of PackageAttributes."""
     packages = []
-        
-    with open(filename) as f:
-        current_pkg = None
-        current_directives = []
-        continued_line = ''
-        
-        for line in f:
-            line = line.rstrip()
-
-            line = filter_comments(line)
-            if not line:
-                continue
-
-            # Handle line continuation
-            if line.endswith('\\'):
-                continued_line += line[:-1] + '\n'
-                continue
-                
-            if continued_line:
-                line = continued_line + line
-                continued_line = ''
-
-            # Package name starts at beginning of line and is not followed by a colon (which indicates 
-            # that the next line(s) are directives for this package)
-            if not line.startswith(' '):
-                # Process previous package if any
-                if current_pkg:
-                    pkg = parse_package_entry(current_pkg, current_directives)
-                    packages.append(pkg)
+    current_pkg = None
+   
+    # Read and process file
+    try:
+        with open(filename) as f:
+            lines = []
+            continued = ''
+            
+            for line_num, line in enumerate(f, start=1):
+                # Handle comments and empty lines
+                line = filter_comments(line.rstrip())
+                if not line:
+                    continue
                     
-
-                # Start new package
-                if ':' in line and not line.endswith(':'):
-                    error(f"Package entry '{line}'")
-                    error(f"  is not formatted correctly")
-                    bail("Package names and directives cannot be on the same line")
-
-                    
-                current_pkg = line.strip().rstrip(':')
-                current_directives = []
-                continue
-
-            # Collect directive
-            if not current_pkg:
-                bail("Found directive without a package name")
+                # Handle line continuation
+                if line.endswith('\\'):
+                    continued += line[:-1] + '\n'
+                    continue
                 
-            line = line.strip()
-            if line:  # Only add non-empty directives
-                current_directives.append(line)
+                if continued:
+                    line = continued + line
+                    continued = ''
+                
+                # Package name or directive?
+                if not line.startswith(' '):
+                    # New package
+                    if ':' in line and not line.endswith(':'):
+                        bail(f"Invalid package format at line {line_num}: {line}\n  Package names and directives must be on separate lines")
+                    
+                    name = line.rstrip(':')
+                    current_pkg = PackageAttributes(name=name, apt_package=name)
+                    packages.append(current_pkg)
+                else:
+                    # Directive
+                    if not current_pkg:
+                        bail(f"Directive without package name at line {line_num}")
+                    if not parse_directive(line.strip(), current_pkg):
+                        bail(f"Unknown directive at line {line_num}: {line}")
+        return PackageList(packages=packages)
     
-    # Process last package if any
-    if current_pkg:
-        pkg = parse_package_entry(current_pkg, current_directives)
-        packages.append(pkg)
+    except OSError as e:
+        bail(f"Error reading {filename}: {e}")
 
-    return PackageList(packages=packages)
+
+##############################################################################
 
 # ----------------------------------------------------------------------------
 # Pretty printers
@@ -322,6 +321,7 @@ def parse_package_list(filename: Path) -> PackageList:
 
 def format_package_list(packages: List[str], min_spacing: int = 2) -> str:
     """Format package list into columns for display."""
+  
     if not packages:
         return ""
 
@@ -366,10 +366,10 @@ def run_script(packages: PackageList, phase: str = ""):
         script = None
         if phase == "pre-install":
             script = package.pre_script
-            run_once = "prescript_run_once" in package.flags or "script_run_once" in package.flags
+            run_once = package.has_flags("prescript_run_once") or package.has_flags("script_run_once")
         else:
             script = package.post_script
-            run_once = "postscript_run_once" in package.flags or "script_run_once" in package.flags
+            run_once = package.has_flags("postscript_run_once") or package.has_flags("script_run_once")
 
         if not script:
             continue
@@ -406,10 +406,7 @@ def run_script(packages: PackageList, phase: str = ""):
 
 
 def download_packages(to_download: PackageList) -> PackageList:
-    """Download packages from URLs.
-
-    Returns a package list of all packages that have had files downloaded.
-    """
+    """Download packages that have URLs and return a package list of those packages. """
 
     commentary("Downloading packages") 
     if not to_download:
@@ -553,6 +550,7 @@ def install_deb_packages(packages: PackageList):
 
 def update_apt_database(run: bool):
     """Update apt package lists."""
+  
     if not run:
         info("Package database update not required")
         return
@@ -572,8 +570,8 @@ def update_apt_database(run: bool):
 # Install a PackageList 
 # ----------------------------------------------------------------------------
 def apply_cmdline_filters(pkg: PackageAttributes) -> bool:
-    """ Apply command line --skip and --only flags.
-    """
+    """ Apply command line --skip and --only flags. """
+  
     if (args.skip and pkg.name in args.skip) or \
         (args.skip_flags and any(flag in args.skip_flags for flag in pkg.flags)):
         return True
@@ -617,7 +615,6 @@ def install_package_list(pkg_list: PackageList):
     flag = []
 
     for pkg in pkg_list:
-
         # Apply command line filters, save data to tell the user what we did and why
         if apply_cmdline_filters(pkg):
             cmdline.append(pkg.name)
@@ -637,12 +634,13 @@ def install_package_list(pkg_list: PackageList):
         if 'force_apt_update' in pkg.flags:
             apt_update_needed = True
 
-        all_repos.append(pkg)
-        all_sources.append(pkg)
-
-        if (pkg.pre_script):
+        if pkg.repositories:
+            all_repos.append(pkg)
+        if pkg.sources:
+            all_sources.append(pkg)
+        if pkg.pre_script:
             pre_scripts.append(pkg)
-        if (pkg.post_script):
+        if pkg.post_script:
             post_scripts.append(pkg)
         if pkg.url and pkg.install_method == 'deb':
             urls.append(pkg)
@@ -701,7 +699,8 @@ def run_installation(packages: PackageList):
 # ----------------------------------------------------------------------------
 
 def clean_args(alist: List[str]) -> List[str]:
-    """Clean up a list of arguments."""
+    """Parse out a comma-separated list of comments into a list of strings """
+ 
     if alist:
         items = []
         for a in alist:
@@ -712,6 +711,7 @@ def clean_args(alist: List[str]) -> List[str]:
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
+ 
     global args
 
     parser = argparse.ArgumentParser(
