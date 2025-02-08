@@ -445,20 +445,38 @@ class Package:
 # PackageList: List of PackageAttributes parse from the packagelist file
 @dataclass
 class PackageList:
-    _packages:          List[Package] = field(default_factory=list)
+    _packages:          List[Tuple[int, Package]] = field(default_factory=list)  # Line number, package
     _apt_update_needed: bool = False
 
+    def __init__(self, filename: Path = None, _packages: List[Tuple[int, Package]] = None):
+        if filename:
+            self.load(filename)
+        elif _packages:
+            self._packages = _packages
+
+    # Hide the line number when iterating
     def __iter__(self):
-        return iter(self._packages)
+        return (package for _, package in self._packages)
          
     def __bool__(self) -> bool:
         return bool(self._packages)
     
-    def append(self, pkg: Package):
-        self._packages.append(pkg)
+    def append(self, line_num: int, pkg: Package) -> bool:
+        """Append a package to the list. Return True if errors found."""
+        ret = False
+
+        existing = next((p for p in self._packages if p[1].name == pkg.name), None)
+        if existing:
+            existing_line_num, _ = existing
+            warning(f"Duplicate package `{pkg.name}` at line {line_num},")
+            warning(f" {pkg.name} first seen at line {existing_line_num}")
+            ret = True
+        
+        self._packages.append((line_num, pkg))
+        return ret
   
     def _filter_packages(self, flags: tuple[str, ...], match: bool = True) -> 'PackageList':
-        filtered = [pkg for pkg in self._packages if pkg.has_flags(*flags) == match]
+        filtered = [(linenum, pkg) for linenum, pkg in self._packages if pkg.has_flags(*flags) == match]
         return PackageList(_packages=filtered)
 
     def get_packages_with_flags(self, *flags: str) -> 'PackageList':
@@ -546,6 +564,7 @@ class PackageList:
         """Parse package list file into list of Package."""
         self._packages = []
         current_pkg = None
+        errors = False
     
         # Read and process file
         if not filename.is_file():
@@ -579,7 +598,7 @@ class PackageList:
                         
                         name = line.rstrip(':')
                         current_pkg = Package(name=name, apt_package=name)
-                        self.append(current_pkg)
+                        errors |= self.append(line_num, current_pkg)
                     else:
                         # Directive
                         if not current_pkg:
@@ -588,6 +607,9 @@ class PackageList:
                             bail(f"Unknown directive at line {line_num}: {line}")
         except OSError as e:
             bail(f"Error reading {filename}: {e}")
+
+        if errors:
+            bail("Errors found in package list")
 
     #-------------------------------------------------
 
@@ -625,13 +647,13 @@ class PackageList:
 # ----------------------------------------------------------------------------
 # ANSI color codes for output
 COLORS = {
-    'COMMENTARY': '\033[94m', # Blue
-    'SUCCESS':    '\033[92m', # Green
-    'WARNING':    '\033[93m', # Yellow
-    'ERROR':      '\033[91m', # Red
-    'NOTICE':     '\033[97m', # White
-    'PHASE':      '\033[95m', # Magenta 
-    'INFO':       '\033[96m', # Cyan
+    'COMMENTARY': '\033[0;94m', # Blue
+    'SUCCESS':    '\033[0;92m', # Green
+    'WARNING':    '\033[0;93m', # Yellow
+    'ERROR':      '\033[0;91m', # Red
+    'NOTICE':     '\033[0;97m', # White
+    'PHASE':      '\033[0;95m', # Magenta 
+    'INFO':       '\033[0;96m', # Cyan
     'END':        '\033[0m'
 }
 
@@ -793,8 +815,7 @@ def main():
     installedPackages.load()
 
     global packageEntries 
-    packageEntries = PackageList()
-    packageEntries.load(args.filename)
+    packageEntries = PackageList(args.filename)
     
     if not packageEntries:
         warning(f"No packages in package list '{args.filename}'")
