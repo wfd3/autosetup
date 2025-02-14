@@ -12,6 +12,17 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional
 
+
+# TODOs:
+# - Add error checking for repo and source at same time, or
+#   - combine repo and source into a single directive
+# - Add comments in source files in /etc/apt/sources.list.d/
+# - What does 'Optional' do and do I need it?
+# - Cleanup pass 
+# - Rewrite the parser
+# - add -i flag to /usr/bin/env?
+
+
 # ----------------------------------------------------------------------------
 # Constants and Configuration
 # ----------------------------------------------------------------------------
@@ -64,7 +75,7 @@ class Package:
     install_method:    str = 'apt'  # 'apt' or 'deb'
     url:               Optional[str] = None    # for deb downloads
     repositories:      Set[str] = field(default_factory=set)
-    sources:           List[tuple[str, str]] = field(default_factory=list)  # [(filename, content),...]
+    sources:           List[tuple[int, str]] = field(default_factory=list)  # [(filename, content),...]
     scripts:           Dict[ScriptPhase, str] = field(default_factory=dict)
     flags:             Set[str] = field(default_factory=set)
     hosts:             Set[str] = field(default_factory=set)
@@ -542,8 +553,14 @@ class PackageList:
                 pkg.install_method = 'deb'
                 pkg.url = content
             case 'repo':
+                if pkg.sources:
+                    warning(f"Package {pkg.name} cannot have both 'repo' and 'source' directives")
+                    return False
                 pkg.repositories.add(content)
             case 'source':
+                if pkg.repositories:
+                    warning(f"Package {pkg.name} cannot have both 'repo' and 'source' directives")
+                    return False
                 try:
                     fname, src = content.split(None, 1)
                     fname = str(Path(APT_SOURCES_DIR).joinpath(Path(fname).name))

@@ -17,10 +17,10 @@ Preview changes without installing anything
 .BR -p ", " --preserve
 Keep temporary working directory
 .TP
-.BR -q ", " --quiet
-Suppress subprocess output
+.BR -v ", " --verbose
+Show subprcoess output
 .TP
-.BR -v ", " --version
+.BR --version
 Show program version
 .TP
 .BR --force-all
@@ -38,18 +38,28 @@ Skip specified packages
 .BR --skip-flags " " \fIFLAGS\fR
 Skip packages with specified flags
 .SH PACKAGE LIST
-The package list is a text file containing package entries, where each entry starts with a package name at the beginning of a line. If the package name is followed by a colon, the subsequent indented lines contain directives that customize its installation; without a colon, the package is installed with default settings. Directives can include download URLs for DEB packages, APT repository information, source list entries, pre/post installation scripts, and flags that control installation behavior. Lines can be continued with a backslash, and comments start with '#'.
+The package list is a text file containing package entries, where each entry starts with a package name at 
+the beginning of a line. If the package name is followed by a colon, the subsequent indented lines contain 
+directives that customize its installation; without a colon, the package is installed with default settings. 
+Directives can include download URLs for DEB packages, APT repository information, source list entries, 
+pre/post installation scripts, hostname wildcards to control if a package should be installed on the host,
+and flags that control installation behavior. Lines can be continued with a backslash, and comments start 
+with '#'.
+
+Hostnames specified in this `hosts` directive is a comma-separated list of hostname matches (web, 
+web.example.com), domain wildcards (\*.example.com) or exclusions with ! prefix (!web, !*.example.com)
 .SH PACKAGE LIST FORMAT EXAMPLE
 The following example demonstrates various
 .B autoinstall
 capabilities
 .PP
-.nf
+.NF
 # Install emacs
 emacs
 
 # Install atop
-atop
+atop:
+  hosts: myhost, !*.foo.com
 
 # Install tcsh, add tcsh to /etc/shells
 tcsh:
@@ -71,10 +81,11 @@ __termination_package:
 This installs four packages and performs cleanup:
 .IP \(bu 4
 .B
-emacs
-and
+emacs is installed via APT;
+.IP \(bu 4
 .B atop
-are installed via APT with default settings;
+is installed via APT with default settings, but only installed on `myhost` and never installed on machines 
+in the foo.com domain;
 .IP \(bu 4
 .B
 tcsh
@@ -91,12 +102,13 @@ apt autoremove after all other installations complete.  Note the preceding under
 .PP
 Lines can be continued with backslash.
 .SH SPECIAL FLAGS
+Each package can have one or more flags.  The flags are indicated by a field called 'flags:' and are comma separated.  The supported flags are:
 .TP
 .B start
-Indicates that this package should be run before unflagged and end flagged packages.
+Indicates that this package should be run before unflagged and `end` flagged packages.
 .TP
 .B end
-Indicates that this package should be run after unflagged and start flagged packages. 
+Indicates that this package should be run after unflagged and `start` flagged packages. 
 .TP
 .B force
 Always reinstall package
