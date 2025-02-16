@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# -*- coding: python -*-
+
 import argparse
 import os
 import subprocess
@@ -14,14 +16,8 @@ from typing import List, Dict, Set, Tuple, Optional
 
 
 # TODOs:
-# - Add error checking for repo and source at same time, or
-#   - combine repo and source into a single directive
-# - Add comments in source files in /etc/apt/sources.list.d/
-# - What does 'Optional' do and do I need it?
 # - Cleanup pass 
 # - Rewrite the parser
-# - add -i flag to /usr/bin/env?
-
 
 # ----------------------------------------------------------------------------
 # Constants and Configuration
@@ -101,7 +97,6 @@ class Package:
         """ Force update apt package database """
     
         if args.dryrun:
-            info("Would update apt package database")
             return
 
         info("Updating package database")
@@ -229,7 +224,6 @@ class Package:
         path = self._semaphore_name(phase)    
 
         if args.dryrun:
-            info(f"Would create semaphore file: {path}")
             return
         
         path.parent.mkdir(parents=True, exist_ok=True)  # Create all parent directories
@@ -259,7 +253,6 @@ class Package:
             return
 
         if args.dryrun:
-            info(f"Would run {self.name} {phase.value}:")
             if args.debug:
                 self.pretty_print_script(phase)
             return
@@ -304,6 +297,9 @@ class Package:
         if self.is_deb_package_installed(self.name) and not self.has_flags('force'):
             debug(f"Package {self.name} already installed, skipping")
             return
+
+        if args.dryrun:
+            return
         
         if not self.downloaded_file:
             bail(f"No downloaded file for package {self.name}")
@@ -315,7 +311,6 @@ class Package:
             return
 
         if args.dryrun:
-            info(f"Would install .deb package {self.name} ({package_name}) from {self.downloaded_file}")
             return
 
         try:
@@ -339,7 +334,6 @@ class Package:
             return
         
         if args.dryrun:
-            info(f"Would install apt package {self.apt_package}")
             return
 
         try:
@@ -364,7 +358,6 @@ class Package:
         
         for repo in self.repositories:
             if args.dryrun:
-                info(f"Would add repository: {repo}")
                 continue
 
             try:
@@ -379,13 +372,13 @@ class Package:
        
         for filename, content in self.sources:
             if args.dryrun:
-                info(f"Would add '{content}' to {filename}")
                 continue
 
             try:
                 if not Path(filename).is_file():
                     debug(f"Adding source file: {filename}")
                     with open(filename, 'w') as sources_file:
+                        sources_file.write(f"# Added by autosetup for package {self.name}\n")
                         sources_file.write(f"{content}\n")
                     self._apt_update_needed = True 
                 else:
@@ -406,12 +399,12 @@ class Package:
         self.downloaded_file = self.name + ".deb"
 
         if args.dryrun:
-            info(f"Would download: {self.url} for package {self.name}")
             return
 
         try:
-            info(f"Downloading {self.url}")
-            info(f"    to file {self.downloaded_file}")
+            if args.debug:
+                info(f"Downloading {self.url}")
+                info(f"    to file {self.downloaded_file}")
             opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
             urllib.request.install_opener(opener)           
             urllib.request.urlretrieve(self.url, self.downloaded_file)
@@ -437,7 +430,7 @@ class Package:
 
         notice("Repo ", end='')
         self.add_repositories()
-        notice("Sources", end='')
+        notice("Sources ", end='')
         self.add_sources()
         if self.needs_apt_update():
             notice("apt-update ", end='')
