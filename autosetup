@@ -9,21 +9,21 @@ import sys
 import tempfile
 import urllib.request
 import socket
-from enum import Enum
+import textwrap
+from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Tuple, Optional
+from typing import List, ClassVar, Dict, Set, Tuple, Optional
 
 
 # TODOs:
 # - Cleanup pass 
-# - Rewrite the parser
 
 # ----------------------------------------------------------------------------
 # Constants and Configuration
 # ----------------------------------------------------------------------------
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 temp_dir: Optional[tempfile.TemporaryDirectory] = None
 APT_SOURCES_DIR: str = "/etc/apt/sources.list.d"
@@ -61,14 +61,45 @@ class PackageDatabase:
         return package in self.installed_packages
 
 # Package: Package description class
+class InstallMethod(Enum):
+    APT = auto()
+    DEB = auto()
+
 @dataclass
 class Package:
+
+    # TODO: All of these constants, string, and flags needs to be reworked.  
+
     class ScriptPhase(Enum):
-        PRE_INSTALL =  'prescript'
-        POST_INSTALL = 'postscript'
+        # Script phases
+        PRE_INSTALL:  ClassVar[str] =  'prescript'
+        POST_INSTALL: ClassVar[str] = 'postscript'
+    
+    # Class-level flag constants
+    FLAG_FORCE: ClassVar[str] = 'force'
+    FLAG_SKIP: ClassVar[str] = 'skip'
+    FLAG_VIRTUAL: ClassVar[str] = 'virtual'
+    FLAG_RUN_ONCE: ClassVar[str] = 'run_once'
+    SCRIPT_ONCE_FLAG_PRE: ClassVar[str] = 'prescript_run_once'
+    SCRIPT_ONCE_FLAG_POST: ClassVar[str] = 'postscript_run_once'
+    SCRIPT_BOTH_ONCE_FLAG: ClassVar[str] = 'script_run_once'
+    
+    # Initialize known flags from constants
+    _known_flags: Set[str] = field(
+        default_factory=lambda: {
+            Package.FLAG_FORCE, Package.FLAG_SKIP, Package.FLAG_VIRTUAL, 
+            Package.FLAG_RUN_ONCE, Package.SCRIPT_ONCE_FLAG_PRE,
+            Package.SCRIPT_ONCE_FLAG_POST, Package.SCRIPT_BOTH_ONCE_FLAG
+        }
+    )   
+    
+    SCRIPT_ONCE_FLAGS: ClassVar[Dict[ScriptPhase, str]] = {
+        ScriptPhase.PRE_INSTALL:  SCRIPT_ONCE_FLAG_PRE,
+        ScriptPhase.POST_INSTALL: SCRIPT_ONCE_FLAG_POST
+    }
 
     name:              str = None
-    install_method:    str = 'apt'  # 'apt' or 'deb'
+    install_method:    InstallMethod = InstallMethod.APT
     url:               Optional[str] = None    # for deb downloads
     repositories:      Set[str] = field(default_factory=set)
     sources:           List[tuple[int, str]] = field(default_factory=list)  # [(filename, content),...]
@@ -79,13 +110,6 @@ class Package:
     apt_package:       str = None
     _force_apt_update: bool = False
     _SEMAPHORE_DIR:    Path = Path("/var/run/autosetup")
-
-    # Class-level constant
-    SCRIPT_ONCE_FLAGS = {
-        ScriptPhase.PRE_INSTALL:  'prescript_run_once',
-        ScriptPhase.POST_INSTALL: 'postscript_run_once'
-    }
-    SCRIPT_BOTH_ONCE_FLAG = 'script_run_once'
 
     def __str__(self) -> str:
         return self.name
@@ -106,6 +130,21 @@ class Package:
         except subprocess.CalledProcessError:
             bail("Error updating package database")
     
+    def flags_exists(self, flags: Set[str]) -> Optional[str]:
+        """Check if all proposed flags are valid and do not duplicate any already set flags. 
+           Return error message if not."""
+    
+        unknown_flags = flags - self._known_flags
+    
+        if unknown_flags:
+            return f"Unknown flag(s) {', '.join(unknown_flags)}"
+    
+        duplicate_flags = flags & self.flags
+        if duplicate_flags:
+            return f"Duplicate flag(s) {', '.join(duplicate_flags)}"
+
+        return None
+    
     def has_flags(self, *flags: str) -> bool:
         """Check if the package has any of the given flags."""
         return bool(self.flags & set(flags))
@@ -114,8 +153,6 @@ class Package:
         """Check if the script should only be run once."""
         return self.has_flags(self.SCRIPT_ONCE_FLAGS[phase]) or self.has_flags(self.SCRIPT_BOTH_ONCE_FLAG)
     
-    import socket
-
     def hostname_matches(self) -> bool:
         """
         Check if current hostname matches any pattern in the given set.
@@ -130,16 +167,16 @@ class Package:
         Returns:
             bool: True if hostname matches any positive pattern and no exclusions
         """
-        current = socket.getfqdn()
+        current: str = socket.getfqdn()
         
         # Split patterns into inclusions and exclusions
-        exclusions = {p[1:] for p in self.hosts if p.startswith('!')}
-        inclusions = {p for p in self.hosts if not p.startswith('!')}
+        exclusions: Set[str] = {p[1:] for p in self.hosts if p.startswith('!')}
+        inclusions: Set[str] = {p for p in self.hosts if not p.startswith('!')}
         
-        def matches_pattern(hostname, pattern):
+        def matches_pattern(hostname: str, pattern: str) -> bool:
             if pattern.startswith('*.'):
                 # Domain wildcard match
-                domain = pattern[2:]  # Remove *. prefix
+                domain: str = pattern[2:]  # Remove *. prefix
                 return hostname.endswith(domain)
             else:
                 # Direct or partial hostname match
@@ -161,28 +198,38 @@ class Package:
                 
         return False
     
+    def hosts_exists(self, hosts: Set[str]) -> Optional[str]:
+        for host in hosts:
+            if host in self.hosts:
+                return f"Duplicate hostname '{host}'"
+        return None
+    
     def add_hosts(self, hosts: Set[str]) -> None:
         """Add hosts to the package."""
         self.hosts.update(hosts)
-
-    def add_scripts(self, phase: ScriptPhase, script: str) -> None:
+    
+    def add_scripts(self, phase: ScriptPhase, script: str) -> Optional[str]:
         """Add a script to the package."""
+        if phase in self.scripts:
+            p = phase.value[0].upper() + phase.value[1:]
+            return f"{p} already defined"
         self.scripts[phase] = script
+        return None
 
     def get_script(self, phase: ScriptPhase) -> str:
         """Get the script for the given phase."""
         return self.scripts.get(phase, None)
 
-    def skip(self):
+    def skip(self) -> Tuple[bool, Optional[str]]:
         """ Return True if this package should be skipped """
 
-        if 'force' in self.flags or args.force_all:
+        if self.has_flags(Package.FLAG_FORCE) or args.force_all:
             return False, "forcing package"
 
         if installedPackages.is_installed(self.name):
             return True, "already installed"
 
-        if self.has_flags('skip'):
+        if self.has_flags(Package.FLAG_SKIP):
             return True, "package has skip flag"
         
         if args.skip and self.name in args.skip:
@@ -193,7 +240,6 @@ class Package:
         
         if args.only and self.name not in args.only:
             return True, "--only flag"
-            return True
         
         if args.only_flags and not self.flags & args.only_flags:
             return True, "--only-flags flag"
@@ -218,14 +264,13 @@ class Package:
    
         return self._SEMAPHORE_DIR / f"{self.name}.{self.SCRIPT_ONCE_FLAGS[phase]}"
 
-    def semaphore_create(self, phase: ScriptPhase):
+    def semaphore_create(self, phase: ScriptPhase) -> None:
         """Create an semaphore file for this package, for the script phase."""
     
-        path = self._semaphore_name(phase)    
-
         if args.dryrun:
             return
         
+        path = self._semaphore_name(phase)
         path.parent.mkdir(parents=True, exist_ok=True)  # Create all parent directories
         try:
             path.touch()
@@ -238,7 +283,7 @@ class Package:
     
     # Installation functions
 
-    def run_script(self, phase: ScriptPhase):
+    def run_script(self, phase: ScriptPhase) -> None:
         """Run a script for this package and phase."""
 
         script = self.get_script(phase)
@@ -271,7 +316,7 @@ class Package:
             error(f"Return code: {result.returncode}")
             bail(f"Script error for package {self.name}")
 
-    def get_name_from_deb_package(self, package) -> str:
+    def get_name_from_deb_package(self, package: Path) -> str:
         """Extract the package name from a deb package file."""
         try:
             result = subprocess.run(['dpkg-deb', '-f', package, "Package"], 
@@ -280,21 +325,21 @@ class Package:
         except subprocess.CalledProcessError:
             bail(f"Error extracting package name from {package}")
 
-    def is_deb_package_installed(self, package_name):
+    def is_deb_package_installed(self, package_name: str) -> bool:
         """ Check if a package is installed using dpkg-query.
             Returns True if the package is installed, False otherwise.
         """
         try:
-            cmd = ["dpkg-query", "-W", "-f=${Status}", package_name]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            cmd: List[str] = ["dpkg-query", "-W", "-f=${Status}", package_name]
+            result: subprocess.CompletedProcess = subprocess.run(cmd, capture_output=True, text=True)
             return "install ok installed" in result.stdout
         except subprocess.CalledProcessError:
             return False
     
-    def install_deb(self):
+    def install_deb(self) -> None:
         """Install a package from a deb file."""
         
-        if self.is_deb_package_installed(self.name) and not self.has_flags('force'):
+        if self.is_deb_package_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
             debug(f"Package {self.name} already installed, skipping")
             return
 
@@ -306,7 +351,7 @@ class Package:
             
         package_name = self.get_name_from_deb_package(self.downloaded_file)
 
-        if self.is_deb_package_installed(package_name) and not self.has_flags('force'):
+        if self.is_deb_package_installed(package_name) and not self.has_flags(Package.FLAG_FORCE):
             debug(f"Downloaded package {self.name} already installed, skipping")
             return
 
@@ -318,18 +363,18 @@ class Package:
         except subprocess.CalledProcessError:
             bail(f"Error installing package {self.name} from {self.downloaded_file}")
 
-    def install_apt(self):
+    def install_apt(self) -> None:
         """Install a package via apt."""
         
         if not self.apt_package:
            bail("No APT package name specified")
            return
          
-        if self.has_flags('no_apt'):
+        if self.has_flags(Package.FLAG_VIRTUAL):
             debug(f"Skipping package {self.name}")
             return
         
-        if installedPackages.is_installed(self.name) and not self.has_flags('force'): 
+        if installedPackages.is_installed(self.name) and not self.has_flags(Pacakge.FLAG_FORCE): 
             debug(f"APT package {self.name} already installed, skipping")
             return
         
@@ -346,14 +391,14 @@ class Package:
     
     def install_package(self) -> None:
         match self.install_method:
-            case 'deb':
+            case InstallMethod.DEB:
                 self.install_deb()
-            case 'apt':
+            case InstallMethod.APT:
                 self.install_apt()
             case _:
                 bail(f"Unknown install method for package {self.name}")
     
-    def add_repositories(self):
+    def add_repositories(self) -> None:
         """Add repositories for the package."""
         
         for repo in self.repositories:
@@ -363,11 +408,11 @@ class Package:
             try:
                 debug(f"Adding repository: {repo}")
                 subprocess.run(['add-apt-repository', '-y', '-n', repo], **run_opts, check=True)
-                self._apt_update_needed = True
+                self._force_apt_update = True
             except subprocess.CalledProcessError:
                 bail(f"Error adding repository: {repo}")
 
-    def add_sources(self):
+    def add_sources(self) -> None:
         """Add sources for the package by creating files in /etc/apt/sources.list.d/."""
        
         for filename, content in self.sources:
@@ -380,7 +425,7 @@ class Package:
                     with open(filename, 'w') as sources_file:
                         sources_file.write(f"# Added by autosetup for package {self.name}\n")
                         sources_file.write(f"{content}\n")
-                    self._apt_update_needed = True 
+                    self._force_apt_update = True
                 else:
                     warning(f"'{filename}' exists, skipping")
             except Exception as e:
@@ -392,7 +437,7 @@ class Package:
             debug(f"No URL for package {self.name}")
             return
             
-        if installedPackages.is_installed(self.name) and not self.has_flags('force'):
+        if installedPackages.is_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
             debug("Not downloading package, already installed")
             return
 
@@ -449,8 +494,10 @@ class Package:
 # PackageList: List of PackageAttributes parse from the packagelist file
 @dataclass
 class PackageList:
-    _packages:          List[Tuple[int, Package]] = field(default_factory=list)  # Line number, package
-    _apt_update_needed: bool = False
+    
+    # TODO: Make the packagelist tokens constants in this class
+
+    _packages: List[Tuple[int, Package]] = field(default_factory=list)  # Line number, package
 
     def __init__(self, filename: Path = None, _packages: List[Tuple[int, Package]] = None):
         if filename:
@@ -478,16 +525,6 @@ class PackageList:
         
         self._packages.append((line_num, pkg))
         return ret
-  
-    def _filter_packages(self, flags: tuple[str, ...], match: bool = True) -> 'PackageList':
-        filtered = [(linenum, pkg) for linenum, pkg in self._packages if pkg.has_flags(*flags) == match]
-        return PackageList(_packages=filtered)
-
-    def get_packages_with_flags(self, *flags: str) -> 'PackageList':
-        return self._filter_packages(flags, match=True)
-   
-    def get_packages_without_flags(self, *flags: str) -> 'PackageList':
-        return self._filter_packages(flags, match=False)
     
     #-------------------------------------------------
     # Package List Parsing
@@ -524,57 +561,82 @@ class PackageList:
         
         return ''.join(result).rstrip()
 
-    def _parse_directive(self, line: str, pkg: Package) -> bool:
+    def _parse_directive(self, line: str, pkg: Package) -> Optional[str]:
         """Parse a single directive line and update package attributes."""
 
         try:
-            dtype, content = line.split(':', 1)
+            directive, content = line.split(':', 1)
         except ValueError:
-            return False
+            return "Malformed directive"
 
-        dtype = dtype.strip().lower()
+        directive = directive.strip().lower()
         content = content.strip()
         
-        match dtype:
+        match directive:
             case 'hosts':
-                pkg.add_hosts(f.strip().lower() for f in content.split(','))
-            case 'flags':
-                pkg.flags.update(f.strip().lower() for f in content.split(','))
-                if 'force' in pkg.flags and 'skip' in pkg.flags:
-                    bail(f"Package {pkg.name} cannot have both 'force' and 'skip' flags")
+                hosts = set(f.strip().lower() for f in content.split(','))
+                err = pkg.hosts_exists(hosts)
+                if err is not None:
+                    return err
+                pkg.add_hosts(hosts)
+
+            case 'flags': # TODO: Only accept known flags.
+                flags = set(f.strip().lower() for f in content.split(','))
+                err = pkg.flags_exists(flags)
+                if err is not None:
+                    return err
+               
+                would_have_force = 'force' in flags or 'force' in pkg.flags
+                would_have_skip = 'skip' in flags or 'skip' in pkg.flags
+    
+                if would_have_force and would_have_skip:
+                    return f"Package cannot have both 'force' and 'skip' flags"
+        
+                pkg.flags.update(flags)
+            
             case 'deb':
-                pkg.install_method = 'deb'
+                if pkg.url:
+                    return f"Duplicate 'deb' directive for package"
+                pkg.install_method = InstallMethod.DEB
                 pkg.url = content
+            
             case 'repo':
                 if pkg.sources:
-                    warning(f"Package {pkg.name} cannot have both 'repo' and 'source' directives")
-                    return False
+                    return f"Cannot have both 'repo' and 'source' directives"
                 pkg.repositories.add(content)
+            
             case 'source':
                 if pkg.repositories:
-                    warning(f"Package {pkg.name} cannot have both 'repo' and 'source' directives")
-                    return False
+                    return f"Cannot have both 'repo' and 'source' directives"
+                
                 try:
                     fname, src = content.split(None, 1)
                     fname = str(Path(APT_SOURCES_DIR).joinpath(Path(fname).name))
                     pkg.sources.append((fname, src))
                 except ValueError:
-                    bail(f"Invalid source format: {content}")
+                    return f"Invalid source format: {content}"
+            
             case Package.ScriptPhase.PRE_INSTALL.value:
-                pkg.add_scripts(Package.ScriptPhase.PRE_INSTALL, content)
+                return pkg.add_scripts(Package.ScriptPhase.PRE_INSTALL, content)
+            
             case Package.ScriptPhase.POST_INSTALL.value:
-                pkg.add_scripts(Package.ScriptPhase.POST_INSTALL, content)
+                return pkg.add_scripts(Package.ScriptPhase.POST_INSTALL, content)
+            
             case 'apt':
+                if pkg.apt_package:
+                    return f"Duplicate 'apt' directive for package"
                 pkg.apt_package = content
+            
             case _:
-                return False
-        return True
+                return f"Unknown directive: {directive}"
+        return None
 
     def load(self, filename: Path) -> None:
         """Parse package list file into list of Package."""
         self._packages = []
         current_pkg = None
-        errors = False
+        expect_directives = False
+        err: Optional[str] = None
     
         # Read and process file
         if not filename.is_file():
@@ -582,7 +644,6 @@ class PackageList:
 
         try:
             with open(filename) as f:
-                lines = []
                 continued = ''
                 
                 for line_num, line in enumerate(f, start=1):
@@ -590,7 +651,7 @@ class PackageList:
                     line = self._filter_comments(line.rstrip())
                     if not line:
                         continue
-                        
+                    
                     # Handle line continuation
                     if line.endswith('\\'):
                         continued += line[:-1] + '\n'
@@ -599,56 +660,66 @@ class PackageList:
                     if continued:
                         line = continued + line
                         continued = ''
-                    
-                    # Package name or directive?
-                    if not line.startswith(' '):
-                        # New package
-                        if ':' in line and not line.endswith(':'):
-                            bail(f"Invalid package format at line {line_num}: {line}\n  Package names and directives must be on separate lines")
-                        
+
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue 
+
+                    err = None
+
+                    # Is this line a package name?
+                    if line.endswith(':') or not ':' in line:
                         name = line.rstrip(':')
+
+                        if expect_directives:  # Expected directives, have a pkg or incomplete directive
+                            err = f"Expecting directives for package '{current_pkg}', found "
+                            if line.endswith(':'):
+                                err += f"incomplete directive '{line.lstrip()}' "
+                            else:
+                                err += f"package '{name}' "
+                            err += f"at line {line_num}"
+                            bail(err)
+
+                        if line.endswith(':'): 
+                            expect_directives = True
+
                         current_pkg = Package(name=name, apt_package=name)
-                        errors |= self.append(line_num, current_pkg)
-                    else:
-                        # Directive
+                        self.append(line_num, current_pkg)
+                        continue
+
+                    # Is this line a directive?
+                    if line.startswith(' ') and (':' in line and not line.endswith(':')):
                         if not current_pkg:
                             bail(f"Directive without package name at line {line_num}")
-                        if not self._parse_directive(line.strip(), current_pkg):
-                            bail(f"Unknown directive at line {line_num}: {line}")
+                        err = self._parse_directive(line.strip(), current_pkg)
+                        if err is not None:
+                            bail(f"Invalid directive syntax at line {line_num}: {err} in package '{current_pkg}'")
+                        expect_directives = False
+                        continue
+
+                    # Error cases
+                    if ':' in line and not line.endswith(':') and not line.startswith(' '):
+                        bail(f"Missing required whitespace before directive at line {line_num}")
+
+                    # Whatever we have in line is an error.  
+                    bail(f"Unknown syntax at line {line_num}: {line}")
         except OSError as e:
             bail(f"Error reading {filename}: {e}")
 
-        if errors:
-            bail("Errors found in package list")
+        # Check if the last package had directives
+        if expect_directives:
+            bail(f"Expecting directives for package '{current_pkg}', instead found end-of-file at line {line_num}")
+
+        return None
 
     #-------------------------------------------------
 
     def install(self) -> None:
 
-        # Installation phases
-        class Phase(Enum):
-            START   = 'start'
-            REGULAR = 'regular'
-            END     = 'end'
-
         success("Starting package installation")
 
-        # Break package list into the different package phases based on per package flags
-
-        for p in Phase:
-            phase_name = p.value
-            phase(f"Starting Phase: {phase_name}")
-        
-            if p == Phase.REGULAR:
-                packages = self.get_packages_without_flags(Phase.START.value, Phase.END.value)
-            else:
-                packages = self.get_packages_with_flags(phase_name)
-
-            if not packages:    
-                continue
-            
-            for pkg in packages:
-                pkg.install()
+        for line_num, pkg in self._packages:
+            pkg.install()
 
         success("Installation complete")
         
@@ -668,11 +739,63 @@ COLORS = {
 }
 
 def colored_output(msg: str, color: str, prefix: str = "", is_error: bool = False, end = '\n'):
-    """Print colored output with prefix."""
+    """Print colored output with prefix, wrapped to terminal width."""
     stream = sys.stderr if is_error else sys.stdout
+    
+    try:
+        terminal_width = os.get_terminal_size().columns
+    except (AttributeError, OSError):
+        terminal_width = 80
+    
+    # Calculate prefix padding
     if prefix:
-        prefix += " "
-    print(f"{COLORS[color]}{prefix}{msg}{COLORS['END']}", file=stream, flush=True, end=end)
+        prefix_display = prefix + ' '
+        pad_display = ' ' * len(prefix)
+        available_width = terminal_width - len(prefix)
+    else:
+        prefix_display = ""
+        pad_display = ""
+        available_width = terminal_width
+
+    # Helper function for printing with appropriate prefix/padding
+    def print_line(text, use_prefix, end='\n'):
+        pad = prefix_display if use_prefix else pad_display
+        print(f"{COLORS[color]}{pad}{text}{COLORS['END']}", file=stream, flush=True, end=end)
+
+    # If msg fits, print it directly
+    if len(msg) + len(prefix_display) <= terminal_width:
+        print_line(msg, True, end=end)
+        return
+                
+    # Let's word-wrap!
+    lines = msg.split('\n')
+    
+    for i, line in enumerate(lines):
+        if not line:  # Empty line
+            print("", file=stream, flush=True)
+            continue
+        
+        words = line.split(' ')
+        current_line = ""
+        is_first = i == 0
+        
+        for word in words:
+            if not current_line:
+                current_line = word         # if we just += the first word to current_line, we get an extra leading space
+            elif len(current_line) + len(word) + 1 > available_width:
+                print_line(current_line, is_first)
+                current_line = word
+                is_first = False
+            else:
+                current_line += ' ' + word
+        
+        # Print any remaining text
+        if current_line:
+            print_line(current_line, is_first)
+
+    # Handle custom end character
+    if end != '\n':
+        print(end=end, file=stream, flush=True)
 
 def info(msg: str, end: str = '\n'):
     colored_output(msg, 'INFO', "", end=end)
