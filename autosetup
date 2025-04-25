@@ -9,15 +9,11 @@ import sys
 import tempfile
 import urllib.request
 import socket
-import textwrap
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, ClassVar, Dict, Set, Tuple, Optional
+from typing import List, ClassVar, Dict, Set, TextIO, Tuple, Optional
 
-
-# TODOs:
-# - Cleanup pass 
 
 # ----------------------------------------------------------------------------
 # Constants and Configuration
@@ -117,7 +113,7 @@ class Package:
     def needs_apt_update(self) -> bool:
         return self._force_apt_update
     
-    def update_apt_database(self) -> None:
+    def update_apt_database(self) -> bool:
         """ Force update apt package database """
     
         if args.dryrun:
@@ -127,9 +123,11 @@ class Package:
         try:
             subprocess.run(['apt', 'update'], **run_opts, check=True)
             success("Package database updated")
+            return True
         except subprocess.CalledProcessError:
-            bail("Error updating package database")
-    
+            error("Error updating package database")
+            return False
+        
     def flags_exists(self, flags: Set[str]) -> Optional[str]:
         """Check if all proposed flags are valid and do not duplicate any already set flags. 
            Return error message if not."""
@@ -283,24 +281,24 @@ class Package:
     
     # Installation functions
 
-    def run_script(self, phase: ScriptPhase) -> None:
+    def run_script(self, phase: ScriptPhase) -> Tuple[bool, Optional[str]]:
         """Run a script for this package and phase."""
 
         script = self.get_script(phase)
 
         if not script:
-            return
+            return True, None
 
         run_once = self.run_once(phase)
 
         if run_once and self.semaphore_exists(phase):
             debug(f"Skipping {self.name} {phase.value}, already run")
-            return
+            return True, None
 
         if args.dryrun:
             if args.debug:
                 self.pretty_print_script(phase)
-            return
+            return True, None
             
         debug(f"Running {self.name} {phase.value}")
         if args.debug or args.verbose:
@@ -310,12 +308,12 @@ class Package:
             subprocess.run(script, **run_opts, shell=True, check=True)
             if run_once:
                 self.semaphore_create(phase)
+            return True, None
         except subprocess.CalledProcessError as result:
-            error(f"Error running {self.name} {phase.value}:")
-            self.pretty_print_script(phase)
-            error(f"Return code: {result.returncode}")
-            bail(f"Script error for package {self.name}")
-
+            if args.debug:
+                self.pretty_print_script(phase)
+            return False, f"Error running {self.name} {phase.value}: return code {result.returncode}"
+            
     def get_name_from_deb_package(self, package: Path) -> str:
         """Extract the package name from a deb package file."""
         try:
@@ -336,15 +334,15 @@ class Package:
         except subprocess.CalledProcessError:
             return False
     
-    def install_deb(self) -> None:
+    def install_deb(self) -> Tuple[bool, Optional[str]]:
         """Install a package from a deb file."""
         
         if self.is_deb_package_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
             debug(f"Package {self.name} already installed, skipping")
-            return
+            return True, None
 
         if args.dryrun:
-            return
+            return True, None
         
         if not self.downloaded_file:
             bail(f"No downloaded file for package {self.name}")
@@ -353,52 +351,59 @@ class Package:
 
         if self.is_deb_package_installed(package_name) and not self.has_flags(Package.FLAG_FORCE):
             debug(f"Downloaded package {self.name} already installed, skipping")
-            return
+            return True, None
 
         if args.dryrun:
-            return
+            return True, None
 
         try:
             subprocess.run(['dpkg', '-i', self.downloaded_file], **run_opts, check=True)
+            return True, None
         except subprocess.CalledProcessError:
-            bail(f"Error installing package {self.name} from {self.downloaded_file}")
+            return False, f"Error installing package {self.name} from {self.downloaded_file}"
 
-    def install_apt(self) -> None:
+    def install_apt(self) -> Tuple[bool, Optional[str]]:
         """Install a package via apt."""
         
         if not self.apt_package:
            bail("No APT package name specified")
-           return
+           return True, None
          
         if self.has_flags(Package.FLAG_VIRTUAL):
             debug(f"Skipping package {self.name}")
-            return
+            return True, None
         
-        if installedPackages.is_installed(self.name) and not self.has_flags(Pacakge.FLAG_FORCE): 
+        if installedPackages.is_installed(self.name) and not self.has_flags(Package.FLAG_FORCE): 
             debug(f"APT package {self.name} already installed, skipping")
-            return
+            return True, None
         
         if args.dryrun:
-            return
+            return True, None
 
         try:
-            # use reinstall to ensure package is installed even if it is already installed.  The 
-            # 'is_installed() and not force' check above will prevent installed packages that should
+            # use:
+            #  - reinstall to ensure package is installed even if it is already installed
+            #  - set DEBIAN_FRONTEND=noninteractive to force default install options
+            #   
+            # The 'is_installed() and not force' check above will prevent installed packages that should
             # not be reinstalled from being reinstalled.
-            subprocess.run(['apt', 'reinstall', '-y', self.apt_package], **run_opts, check=True)
+            env = os.environ.copy()
+            env["DEBIAN_FRONTEND"] = "noninteractive"
+            subprocess.run(['apt', 'reinstall', '-y', self.apt_package], **run_opts, env=env, check=True)
+            return True, None
         except subprocess.CalledProcessError:
-            bail(f"Error installing package {self.apt_package}")
+            return False, f"Error installing package {self.apt_package}"
     
-    def install_package(self) -> None:
+    def install_package(self) -> Tuple[bool, Optional[str]]:
         match self.install_method:
             case InstallMethod.DEB:
-                self.install_deb()
+                return self.install_deb()
             case InstallMethod.APT:
-                self.install_apt()
+                return self.install_apt()
             case _:
-                bail(f"Unknown install method for package {self.name}")
+                return False, f"Unknown install method for package {self.name}"
     
-    def add_repositories(self) -> None:
+    def add_repositories(self) -> Tuple[bool, Optional[str]]:
         """Add repositories for the package."""
         
         for repo in self.repositories:
@@ -410,9 +415,11 @@ class Package:
                 subprocess.run(['add-apt-repository', '-y', '-n', repo], **run_opts, check=True)
                 self._force_apt_update = True
             except subprocess.CalledProcessError:
-                bail(f"Error adding repository: {repo}")
+                return False, f"Error adding repository: {repo}"
+        
+        return True, None
 
-    def add_sources(self) -> None:
+    def add_sources(self) -> Tuple[bool, Optional[str]]:
         """Add sources for the package by creating files in /etc/apt/sources.list.d/."""
        
         for filename, content in self.sources:
@@ -429,22 +436,24 @@ class Package:
                 else:
                     warning(f"'{filename}' exists, skipping")
             except Exception as e:
-                bail(f"Error adding source to {filename}: {e}")
+               return False, f"Error adding source to {filename}: {e}"
+            
+        return True, None
 
-    def download_package(self) -> None:
+    def download_package(self) -> Tuple[bool, Optional[str]]:
         
         if not self.url:
             debug(f"No URL for package {self.name}")
-            return
+            return True, None
             
         if installedPackages.is_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
             debug("Not downloading package, already installed")
-            return
+            return True, None
 
         self.downloaded_file = self.name + ".deb"
 
         if args.dryrun:
-            return
+            return True, None
 
         try:
             if args.debug:
@@ -455,12 +464,13 @@ class Package:
             urllib.request.urlretrieve(self.url, self.downloaded_file)
         
             if not Path(self.downloaded_file).is_file():
-                bail(f"Downloaded file {self.downloaded_file} not found")
-
+                return False, f"Downloaded file {self.downloaded_file} not found"
+            
+            return True, None
         except Exception as e:
-            bail(f"Error downloading from URL {self.url}: {e}")
+            return False, f"Error downloading from URL {self.url}: {e}"
 
-    def install(self) -> None:
+    def install(self) -> bool:
         """Install the package."""
 
         notice(f"{self.name+': ':<32}", end='')
@@ -468,28 +478,53 @@ class Package:
         skip, reason = self.skip()
         if skip:
             commentary(f"skipped, {reason}")
-            return
-        
+            return True
+
         # Order of operation:
         #   repos, sources, preinstall script, download, install, postinstall script
+        try:
+            notice("Repo ", end='')
+            ok, err = self.add_repositories()
+            if not ok:
+                raise RuntimeError(err)
 
-        notice("Repo ", end='')
-        self.add_repositories()
-        notice("Sources ", end='')
-        self.add_sources()
-        if self.needs_apt_update():
-            notice("apt-update ", end='')
-            self.update_apt_database()
-        notice(f"Pre ", end='')
-        self.run_script(self.ScriptPhase.PRE_INSTALL)
-        notice("DLoad ", end='')
-        self.download_package()
-        notice("PkgIns ", end='')
-        self.install_package()
-        notice("Post ", end='')
-        self.run_script(self.ScriptPhase.POST_INSTALL)
+            notice("Sources ", end='')
+            ok, err = self.add_sources()
+            if not ok:
+                raise RuntimeError(err)
 
-        success("DONE")
+            if self.needs_apt_update():
+                notice("apt-update ", end='')
+                if not self.update_apt_database():
+                    raise RuntimeError("apt update failed")
+
+            notice(f"Pre ", end='')
+            ok, err = self.run_script(self.ScriptPhase.PRE_INSTALL)
+            if not ok:
+                raise RuntimeError(err)
+
+            notice("DLoad ", end='')
+            ok, err = self.download_package()
+            if not ok:
+                raise RuntimeError(err)
+
+            notice("PkgIns ", end='')
+            ok, err = self.install_package()
+            if not ok:
+                raise RuntimeError(err)
+
+            notice("Post ", end='')
+            ok, err = self.run_script(self.ScriptPhase.POST_INSTALL)
+            if not ok:
+                raise RuntimeError(err)
+
+            success("DONE")
+            return True
+
+        except RuntimeError as e:
+            colored_output(f"\n{self.name+':'} {e}", 'ERROR')
+            return False
+            
 
 # PackageList: List of PackageAttributes parse from the packagelist file
 @dataclass
@@ -525,6 +560,10 @@ class PackageList:
         
         self._packages.append((line_num, pkg))
         return ret
+    
+    def __len__(self) -> int:
+        """Return the number of packages in the list."""
+        return len(self._packages)
     
     #-------------------------------------------------
     # Package List Parsing
@@ -718,10 +757,19 @@ class PackageList:
 
         success("Starting package installation")
 
+        errors = []
         for line_num, pkg in self._packages:
-            pkg.install()
+            if not pkg.install():
+                if args.stop_on_errors:
+                    bail(f"Stopping installation due to errors in package '{pkg.name}' at line {line_num}")
+                
+                errors.append(pkg.name)
 
-        success("Installation complete")
+        if len(errors) > 0:
+            colored_output(f"Installation completed with {len(errors)} errors in packages:", 'ERROR')
+            colored_output(f'{", ".join(errors)}', 'ERROR')
+        else:
+            success("Installation complete")
         
 # ----------------------------------------------------------------------------
 # Output Functions
@@ -735,36 +783,28 @@ COLORS = {
     'NOTICE':     '\033[0;97m', # White
     'PHASE':      '\033[0;95m', # Magenta 
     'INFO':       '\033[0;96m', # Cyan
-    'END':        '\033[0m'
+    'END':        '\033[0m', 
+    '':           ''            # No color
 }
 
-def colored_output(msg: str, color: str, prefix: str = "", is_error: bool = False, end = '\n'):
+def colored_output(msg: str, color: str = "", prefix: str = "", stream: TextIO = sys.stderr, end = '\n'):
     """Print colored output with prefix, wrapped to terminal width."""
-    stream = sys.stderr if is_error else sys.stdout
     
     try:
         terminal_width = os.get_terminal_size().columns
     except (AttributeError, OSError):
         terminal_width = 80
     
-    # Calculate prefix padding
     if prefix:
-        prefix_display = prefix + ' '
-        pad_display = ' ' * len(prefix)
-        available_width = terminal_width - len(prefix)
-    else:
-        prefix_display = ""
-        pad_display = ""
-        available_width = terminal_width
+        prefix += ' '
 
     # Helper function for printing with appropriate prefix/padding
-    def print_line(text, use_prefix, end='\n'):
-        pad = prefix_display if use_prefix else pad_display
-        print(f"{COLORS[color]}{pad}{text}{COLORS['END']}", file=stream, flush=True, end=end)
+    def print_line(text, pre, end='\n'):
+        print(f"{COLORS[color]}{pre}{text}{COLORS['END']}", file=stream, flush=True, end=end)
 
     # If msg fits, print it directly
-    if len(msg) + len(prefix_display) <= terminal_width:
-        print_line(msg, True, end=end)
+    if len(msg) + len(prefix) <= terminal_width:
+        print_line(msg, prefix, end=end)
         return
                 
     # Let's word-wrap!
@@ -782,8 +822,8 @@ def colored_output(msg: str, color: str, prefix: str = "", is_error: bool = Fals
         for word in words:
             if not current_line:
                 current_line = word         # if we just += the first word to current_line, we get an extra leading space
-            elif len(current_line) + len(word) + 1 > available_width:
-                print_line(current_line, is_first)
+            elif len(current_line) + len(word) + 1 > terminal_width - len(prefix):
+                print_line(current_line, prefix if is_first else ' ' * len(prefix))
                 current_line = word
                 is_first = False
             else:
@@ -791,7 +831,7 @@ def colored_output(msg: str, color: str, prefix: str = "", is_error: bool = Fals
         
         # Print any remaining text
         if current_line:
-            print_line(current_line, is_first)
+            print_line(current_line, prefix if is_first else ' ' * len(prefix))
 
     # Handle custom end character
     if end != '\n':
@@ -810,7 +850,7 @@ def warning(msg: str, end: str = '\n'):
     colored_output(msg, 'WARNING', "WARNING:", end=end)
 
 def error(msg: str, end: str = '\n'):
-    colored_output(msg, 'ERROR', "\nERROR:", True, end=end)
+    colored_output(msg, 'ERROR', "\nERROR:", stream=sys.stderr, end=end)
 
 def notice(msg: str, end: str = '\n'):
     colored_output(msg, 'NOTICE', end=end)
@@ -904,6 +944,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--debug', action='store_true', 
                         help='Print any script source before execution')
     parser.add_argument('filename', help='Package list file')
+    parser.add_argument('-s', '--stop_on_errors', action='store_true',
+                        help='Stop on errors')
     parser.add_argument('--skip', nargs=1, 
                       help=f'Do not install package these packages (comma separated)')
     parser.add_argument('--skip-flags', nargs=1,
@@ -914,6 +956,8 @@ def parse_arguments() -> argparse.Namespace:
                         help='Only install these packages (comma separated)')
     parser.add_argument('--force-all', action='store_true',
                         help='Force install all the packages')
+    parser.add_argument("--show", action='store_true',
+                        help='Show the package list and exit')
     
     args = parser.parse_args()
 
@@ -954,6 +998,17 @@ def main():
         warning(f"No packages in package list '{args.filename}'")
         return
   
+    # Show the package list and exit
+    if args.show:
+        pkgs = ""
+        for pkg in packageEntries:
+            pkgs += f"{pkg.name}, "
+        pkgs = pkgs.rstrip(', ')
+        colored_output(f"{len(packageEntries)} packages in '{args.filename}'")
+        colored_output(f"Package list:")
+        colored_output(f"{pkgs}")
+        return
+    
     # Set up environment
     if not args.dryrun:
         root_check()

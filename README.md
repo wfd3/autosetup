@@ -1,6 +1,6 @@
 # Autosetup - Automated system configuration
 
-A flexible system that configures a newly installed linux machine to your specifications.  Automates the bootstrapping of new systems with no dependencies beyond what is provided in a fresh Linux install.
+A system that configures a newly installed linux machine to your specifications.  Automates the bootstrapping of new systems with no dependencies beyond what is provided in a fresh Linux install.
 
 ## Overview
 
@@ -10,7 +10,7 @@ The package list is a text file containing package entries, where each entry sta
 
 Packages are installed in the order they appear in the package file, however packages that have the 'start' or 'end' flags are installed first and last respectively in the order they appear in the file.  Packages that have neither of these flags are installed after 'start' packages but before 'end' packages.
 
-Each package is installed in it's entirety and `autosetup` will halt on any errors encountered in the process.  For each package, installation process proceeds as follows: 
+Each package is installed in it's entirety and `autosetup` will halt on any errors encountered in the process if `--stop_on_errors` is set.  For each package, installation process proceeds as follows: 
 1. If the package has a new APT package repository or a new entry in `/etc/apt.d/sources.list.d/`, add it
 3. If the package has a preinstall script, run it
 4. If the package needs to download any packages directly, do so.
@@ -69,7 +69,7 @@ Packages can have optional flags that control how `autosetup` manages that speci
 - `force`: Always reinstall this package
 - `skip`: Skip this package
 - `force_apt_update`: Force APT database update after installing this package
-- `no_apt`: Skip APT installation phase (ie, don't assume this package references an APT package)
+- `virtual`: This is a virtual package, do not attempt to apt install the package.
 - `prescript_run_once`: Run the prescript(s) for this package only once on this system
 - `postscript_run_once`: Run the postscript(s) only once on this system
 - `script_run_once`: Run the pre- and postscript(s) only once on this system
@@ -89,12 +89,14 @@ The script must be run as root unless using --dryrun mode:
 - `-n, --dryrun`: Preview changes without installing anything
 - `-p, --preserve`: Keep temporary working directory
 - `-v, --verbose`: Show subprocess output
+- '-s. --stop_on_errors`: Stop if an error is encountered
 - `--debug`: Show debugging information
 - `--force-all`: Force reinstallation of all packages
 - `--only PKGS`: Only install specified packages
 - `--only-flags FLAGS`: Only install packages with specified flags
 - `--skip PKGS`: Skip specified packages
 - `--skip-flags FLAGS`: Skip packages with specified flags
+- `--show`: Parse the package list file, print the packages found and exit
 - `--version`: Show program version
 
 ## Examples
