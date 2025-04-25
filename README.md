@@ -8,9 +8,7 @@ This system automates the secondary installation and configuration of multiple p
 
 The package list is a text file containing package entries, where each entry starts with a package name at the beginning of a line. If the package name is followed by a colon, the subsequent indented lines contain directives that customize its installation; without a colon, the package is installed with default settings. Directives can include download URLs for DEB packages, APT repository information, source list entries, pre/post installation scripts, and flags that control installation behavior. Lines can be continued with a backslash, and comments start with '#'.  Packages cannot appear in the file more than once (and `autosetup` will error if it encounters duplicate packages).
 
-Packages are installed in the order they appear in the package file, however packages that have the 'start' or 'end' flags are installed first and last respectively in the order they appear in the file.  Packages that have neither of these flags are installed after 'start' packages but before 'end' packages.
-
-Each package is installed in it's entirety and `autosetup` will halt on any errors encountered in the process if `--stop_on_errors` is set.  For each package, installation process proceeds as follows: 
+Packages are installed in the order they appear in the package file.  Each package is installed in it's entirety and `autosetup` will halt on any errors encountered in the process if `--stop_on_errors` is set.  For each package, installation process proceeds as follows: 
 1. If the package has a new APT package repository or a new entry in `/etc/apt.d/sources.list.d/`, add it
 3. If the package has a preinstall script, run it
 4. If the package needs to download any packages directly, do so.
@@ -37,10 +35,10 @@ Here's an example that demonstrates the various package list formats:
     tree:
       hosts: *.foo.com
     
-    # Clean up from installation -- note that the 'no_apt' flag tells autosetup to not try 
+    # Clean up from installation -- note that the 'virtual' flag tells autosetup to not try 
     # to 'apt install' this package
     __termination_package:
-      flags: end, no_apt
+      flags: end, virtual
       prescript: apt -y autoremove
 
 This example:
@@ -64,8 +62,6 @@ Packages in the Package List can have directives that provide `autosetup` instru
 ### Package Flags
 
 Packages can have optional flags that control how `autosetup` manages that specific package.  The current set of flags are:
-- `start`: Install this package before all other packages
-- `end`: Install this package after all other packages
 - `force`: Always reinstall this package
 - `skip`: Skip this package
 - `force_apt_update`: Force APT database update after installing this package
