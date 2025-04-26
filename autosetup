@@ -68,30 +68,40 @@ class Package:
 
     class ScriptPhase(Enum):
         # Script phases
-        PRE_INSTALL:  ClassVar[str] =  'prescript'
-        POST_INSTALL: ClassVar[str] = 'postscript'
+        preinstall = 'prescript'
+        postinstall = 'postscript'
     
     # Class-level flag constants
-    FLAG_FORCE: ClassVar[str] = 'force'
-    FLAG_SKIP: ClassVar[str] = 'skip'
-    FLAG_VIRTUAL: ClassVar[str] = 'virtual'
-    FLAG_RUN_ONCE: ClassVar[str] = 'run_once'
-    SCRIPT_ONCE_FLAG_PRE: ClassVar[str] = 'prescript_run_once'
-    SCRIPT_ONCE_FLAG_POST: ClassVar[str] = 'postscript_run_once'
-    SCRIPT_BOTH_ONCE_FLAG: ClassVar[str] = 'script_run_once'
+    class Flags(Enum):
+        force = 'force'
+        skip = 'skip'
+        virtual = 'virtual'
+        run_once = 'run_once'
+        prescript_run_once = 'prescript_run_once'
+        postscript_run_once = 'postscript_run_once'
+        pre_and_post_run_once = 'script_run_once'
+    
+    # Package directives:
+    class Directives(Enum):
+        hosts = 'hosts'
+        flags = 'flags'
+        deb = 'deb'
+        repo = 'repo'
+        source = 'source'
+        apt = 'apt'
     
     # Initialize known flags from constants
     _known_flags: Set[str] = field(
         default_factory=lambda: {
-            Package.FLAG_FORCE, Package.FLAG_SKIP, Package.FLAG_VIRTUAL, 
-            Package.FLAG_RUN_ONCE, Package.SCRIPT_ONCE_FLAG_PRE,
-            Package.SCRIPT_ONCE_FLAG_POST, Package.SCRIPT_BOTH_ONCE_FLAG
+            Package.Flags.force, Package.Flags.skip, Package.Flags.virtual,
+            Package.Flags.run_once, Package.Flags.prescript_run_once,
+            Package.Flags.postscript_run_once, Package.Flags.pre_and_post_run_once
         }
     )   
     
     SCRIPT_ONCE_FLAGS: ClassVar[Dict[ScriptPhase, str]] = {
-        ScriptPhase.PRE_INSTALL:  SCRIPT_ONCE_FLAG_PRE,
-        ScriptPhase.POST_INSTALL: SCRIPT_ONCE_FLAG_POST
+        ScriptPhase.preinstall:  Flags.prescript_run_once,
+        ScriptPhase.postinstall: Flags.postscript_run_once
     }
 
     name:              str = None
@@ -100,7 +110,7 @@ class Package:
     repositories:      Set[str] = field(default_factory=set)
     sources:           List[tuple[int, str]] = field(default_factory=list)  # [(filename, content),...]
     scripts:           Dict[ScriptPhase, str] = field(default_factory=dict)
-    flags:             Set[str] = field(default_factory=set)
+    flags:             Set[Flags] = field(default_factory=set)
     hosts:             Set[str] = field(default_factory=set)
     downloaded_file:   Optional[str] = None
     apt_package:       str = None
@@ -109,6 +119,31 @@ class Package:
 
     def __str__(self) -> str:
         return self.name
+    
+    def show(self) -> str:
+        """Return a human-readable string representation of the package."""
+        pre = self.pretty_script(self.ScriptPhase.preinstall)
+        post = self.pretty_script(self.ScriptPhase.postinstall)
+        if pre: 
+            pre = "\n" + pre
+        else: 
+            pre = ""
+        if post:
+            post = "\n" + post
+        else:
+            post = ""
+        
+        return (
+                f"{self.name}:\n"
+                f"  URL: {self.url or 'N/A'}\n"
+                f"  Repositories: {', '.join(self.repositories) if self.repositories else 'None'}\n"
+                f"  Sources: {', '.join(f'{fname}: {content}' for fname, content in self.sources) if self.sources else 'None'}\n"
+                f"  Pre-install: {pre}\n"
+                f"  Post-install: {post}\n"
+                f"  Flags: {', '.join(flag.name for flag in self.flags) if self.flags else 'None'}\n"
+                f"  Hosts: {', '.join(self.hosts) if self.hosts else 'None'}\n"
+                f"  Downloaded File: {self.downloaded_file or 'None'}\n"
+                f"  APT Package: {self.apt_package or 'None'}\n")
     
     def needs_apt_update(self) -> bool:
         return self._force_apt_update
@@ -128,7 +163,22 @@ class Package:
             error("Error updating package database")
             return False
         
-    def flags_exists(self, flags: Set[str]) -> Optional[str]:
+    def parse_flags(self, input: str) -> Set[Flags]:
+        """Parse a comma-separated list of flags into a set."""
+        strings = set(f.strip().lower() for f in input.split(','))
+        flags = set()
+        valid_values = {flag.value for flag in self.Flags}
+
+        for s in strings:
+            if s not in valid_values:
+                raise ValueError(f"Invalid flag: {s}")
+            for flag in self.Flags:
+                if flag.value == s:
+                    flags.add(flag)
+                    break
+        return flags
+
+    def flags_exists(self, flags: Set[Flags]) -> Optional[str]:
         """Check if all proposed flags are valid and do not duplicate any already set flags. 
            Return error message if not."""
     
@@ -149,7 +199,7 @@ class Package:
     
     def run_once(self, phase: ScriptPhase) -> bool:
         """Check if the script should only be run once."""
-        return self.has_flags(self.SCRIPT_ONCE_FLAGS[phase]) or self.has_flags(self.SCRIPT_BOTH_ONCE_FLAG)
+        return self.has_flags(self.SCRIPT_ONCE_FLAGS[phase]) or self.has_flags(self.Flags.pre_and_post_run_once)
     
     def hostname_matches(self) -> bool:
         """
@@ -214,20 +264,20 @@ class Package:
         self.scripts[phase] = script
         return None
 
-    def get_script(self, phase: ScriptPhase) -> str:
+    def get_script(self, phase: ScriptPhase) -> Optional[str]:
         """Get the script for the given phase."""
         return self.scripts.get(phase, None)
 
     def skip(self) -> Tuple[bool, Optional[str]]:
         """ Return True if this package should be skipped """
 
-        if self.has_flags(Package.FLAG_FORCE) or args.force_all:
+        if self.has_flags(Package.Flags.force) or args.force_all:
             return False, "forcing package"
 
         if installedPackages.is_installed(self.name):
             return True, "already installed"
 
-        if self.has_flags(Package.FLAG_SKIP):
+        if self.has_flags(Package.Flags.skip):
             return True, "package has skip flag"
         
         if args.skip and self.name in args.skip:
@@ -247,10 +297,12 @@ class Package:
         
         return False, "Not skipping"
 
-    def pretty_script(self, script: ScriptPhase) -> str:
+    def pretty_script(self, script: ScriptPhase) -> Optional[str]:
         """Format script commands for display."""
 
         s = self.get_script(script)
+        if s is None:
+            return s
         return f"    " + s  # TODO: this needs to be improved
     
     def pretty_print_script(self, script: ScriptPhase) -> None:
@@ -337,7 +389,7 @@ class Package:
     def install_deb(self) -> Tuple[bool, Optional[str]]:
         """Install a package from a deb file."""
         
-        if self.is_deb_package_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
+        if self.is_deb_package_installed(self.name) and not self.has_flags(Package.Flags.force):
             debug(f"Package {self.name} already installed, skipping")
             return True, None
 
@@ -349,7 +401,7 @@ class Package:
             
         package_name = self.get_name_from_deb_package(self.downloaded_file)
 
-        if self.is_deb_package_installed(package_name) and not self.has_flags(Package.FLAG_FORCE):
+        if self.is_deb_package_installed(package_name) and not self.has_flags(Package.Flags.force):
             debug(f"Downloaded package {self.name} already installed, skipping")
             return True, None
 
@@ -369,11 +421,11 @@ class Package:
            bail("No APT package name specified")
            return True, None
          
-        if self.has_flags(Package.FLAG_VIRTUAL):
+        if self.has_flags(Package.Flags.virtual):
             debug(f"Skipping package {self.name}")
             return True, None
         
-        if installedPackages.is_installed(self.name) and not self.has_flags(Package.FLAG_FORCE): 
+        if installedPackages.is_installed(self.name) and not self.has_flags(Package.Flags.force): 
             debug(f"APT package {self.name} already installed, skipping")
             return True, None
         
@@ -446,7 +498,7 @@ class Package:
             debug(f"No URL for package {self.name}")
             return True, None
             
-        if installedPackages.is_installed(self.name) and not self.has_flags(Package.FLAG_FORCE):
+        if installedPackages.is_installed(self.name) and not self.has_flags(Package.Flags.force):
             debug("Not downloading package, already installed")
             return True, None
 
@@ -499,7 +551,7 @@ class Package:
                     raise RuntimeError("apt update failed")
 
             notice(f"Pre ", end='')
-            ok, err = self.run_script(self.ScriptPhase.PRE_INSTALL)
+            ok, err = self.run_script(self.ScriptPhase.preinstall)
             if not ok:
                 raise RuntimeError(err)
 
@@ -514,7 +566,7 @@ class Package:
                 raise RuntimeError(err)
 
             notice("Post ", end='')
-            ok, err = self.run_script(self.ScriptPhase.POST_INSTALL)
+            ok, err = self.run_script(self.ScriptPhase.postinstall)
             if not ok:
                 raise RuntimeError(err)
 
@@ -522,7 +574,7 @@ class Package:
             return True
 
         except RuntimeError as e:
-            colored_output(f"\n{self.name+':'} {e}", 'ERROR')
+            cprint(f"\n{self.name+':'} {e}", Colors.ERROR, stream=sys.stderr)
             return False
             
 
@@ -547,6 +599,10 @@ class PackageList:
     def __bool__(self) -> bool:
         return bool(self._packages)
     
+    def __len__(self) -> int:
+        """Return the number of packages in the list."""
+        return len(self._packages)
+    
     def append(self, line_num: int, pkg: Package) -> bool:
         """Append a package to the list. Return True if errors found."""
         ret = False
@@ -561,10 +617,20 @@ class PackageList:
         self._packages.append((line_num, pkg))
         return ret
     
-    def __len__(self) -> int:
-        """Return the number of packages in the list."""
-        return len(self._packages)
+    def show(self) -> None:
+        pkgs = ""
+        for _, pkg in self._packages:
+            pkgs += f"{pkg.name}, "
+
+        pkgs = pkgs.rstrip(', ')
+        cprint(f"{len(packageEntries)} packages in '{args.filename}'", Colors.CYAN)
+        cprint(f"Package list:", Colors.CYAN)
+        cprint(f"{pkgs}", Colors.WHITE)
     
+    def list(self)-> None:
+        for _, pkg in self._packages:
+            print(pkg.show())
+        
     #-------------------------------------------------
     # Package List Parsing
    
@@ -612,39 +678,42 @@ class PackageList:
         content = content.strip()
         
         match directive:
-            case 'hosts':
+            case Package.Directives.hosts.value:
                 hosts = set(f.strip().lower() for f in content.split(','))
                 err = pkg.hosts_exists(hosts)
                 if err is not None:
                     return err
                 pkg.add_hosts(hosts)
 
-            case 'flags': # TODO: Only accept known flags.
-                flags = set(f.strip().lower() for f in content.split(','))
+            case Package.Directives.flags.value: 
+                try:
+                    flags = pkg.parse_flags(content)
+                except ValueError as e:
+                    return str(e)
                 err = pkg.flags_exists(flags)
                 if err is not None:
                     return err
                
-                would_have_force = 'force' in flags or 'force' in pkg.flags
-                would_have_skip = 'skip' in flags or 'skip' in pkg.flags
+                would_have_force = Package.Flags.force.value in flags or Package.Flags.force.value in pkg.flags
+                would_have_skip = Package.Flags.skip.value in flags or Package.Flags.skip.value in pkg.flags
     
                 if would_have_force and would_have_skip:
                     return f"Package cannot have both 'force' and 'skip' flags"
         
                 pkg.flags.update(flags)
             
-            case 'deb':
+            case Package.Directives.deb.value:
                 if pkg.url:
                     return f"Duplicate 'deb' directive for package"
                 pkg.install_method = InstallMethod.DEB
                 pkg.url = content
             
-            case 'repo':
+            case Package.Directives.repo.value:
                 if pkg.sources:
                     return f"Cannot have both 'repo' and 'source' directives"
                 pkg.repositories.add(content)
             
-            case 'source':
+            case Package.Directives.source.value:
                 if pkg.repositories:
                     return f"Cannot have both 'repo' and 'source' directives"
                 
@@ -655,13 +724,13 @@ class PackageList:
                 except ValueError:
                     return f"Invalid source format: {content}"
             
-            case Package.ScriptPhase.PRE_INSTALL.value:
-                return pkg.add_scripts(Package.ScriptPhase.PRE_INSTALL, content)
+            case Package.ScriptPhase.preinstall.value:
+                return pkg.add_scripts(Package.ScriptPhase.preinstall, content)
             
-            case Package.ScriptPhase.POST_INSTALL.value:
-                return pkg.add_scripts(Package.ScriptPhase.POST_INSTALL, content)
+            case Package.ScriptPhase.postinstall.value:
+                return pkg.add_scripts(Package.ScriptPhase.postinstall, content)
             
-            case 'apt':
+            case Package.Directives.apt.value:
                 if pkg.apt_package:
                     return f"Duplicate 'apt' directive for package"
                 pkg.apt_package = content
@@ -754,9 +823,7 @@ class PackageList:
     #-------------------------------------------------
 
     def install(self) -> None:
-
         success("Starting package installation")
-
         errors = []
         for line_num, pkg in self._packages:
             if not pkg.install():
@@ -766,8 +833,8 @@ class PackageList:
                 errors.append(pkg.name)
 
         if len(errors) > 0:
-            colored_output(f"Installation completed with {len(errors)} errors in packages:", 'ERROR')
-            colored_output(f'{", ".join(errors)}', 'ERROR')
+            cprint(f"Installation completed with {len(errors)} errors in packages:", Colors.ERROR)
+            cprint(f'{", ".join(errors)}', Colors.WHITE)
         else:
             success("Installation complete")
         
@@ -775,19 +842,29 @@ class PackageList:
 # Output Functions
 # ----------------------------------------------------------------------------
 # ANSI color codes for output
-COLORS = {
-    'COMMENTARY': '\033[0;94m', # Blue
-    'SUCCESS':    '\033[0;92m', # Green
-    'WARNING':    '\033[0;93m', # Yellow
-    'ERROR':      '\033[0;91m', # Red
-    'NOTICE':     '\033[0;97m', # White
-    'PHASE':      '\033[0;95m', # Magenta 
-    'INFO':       '\033[0;96m', # Cyan
-    'END':        '\033[0m', 
-    '':           ''            # No color
-}
+class Colors(Enum):
+    """ANSI color codes for terminal output."""
+    BLUE =    '\033[0;94m' # Blue
+    GREEN =   '\033[0;92m' # Green
+    YELLOW =  '\033[0;93m' # Yellow
+    RED =     '\033[0;91m' # Red
+    WHITE =   '\033[0;97m' # White
+    MAGENTA = '\033[0;95m' # Magenta 
+    CYAN =    '\033[0;96m' # Cyan
+    
+    # Aliases
+    COMMENTARY = BLUE
+    SUCCESS =    GREEN
+    WARNING =    YELLOW
+    ERROR =      RED
+    NOTICE =     WHITE
+    PHASE =      MAGENTA
+    INFO =       CYAN
+    
+    _END =       '\033[0m' 
+    NONE =       ''            # No color
 
-def colored_output(msg: str, color: str = "", prefix: str = "", stream: TextIO = sys.stderr, end = '\n'):
+def cprint(msg: str, color: Colors = Colors.NONE, prefix: str = "", stream: TextIO = sys.stderr, end = '\n'):
     """Print colored output with prefix, wrapped to terminal width."""
     
     try:
@@ -800,7 +877,7 @@ def colored_output(msg: str, color: str = "", prefix: str = "", stream: TextIO =
 
     # Helper function for printing with appropriate prefix/padding
     def print_line(text, pre, end='\n'):
-        print(f"{COLORS[color]}{pre}{text}{COLORS['END']}", file=stream, flush=True, end=end)
+        print(f"{color.value}{pre}{text}{Colors._END.value}", file=stream, flush=True, end=end)
 
     # If msg fits, print it directly
     if len(msg) + len(prefix) <= terminal_width:
@@ -838,29 +915,29 @@ def colored_output(msg: str, color: str = "", prefix: str = "", stream: TextIO =
         print(end=end, file=stream, flush=True)
 
 def info(msg: str, end: str = '\n'):
-    colored_output(msg, 'INFO', "", end=end)
+    cprint(msg, Colors.INFO, end=end)
 
 def success(msg: str, end: str = '\n'):
-    colored_output(msg, 'SUCCESS', end=end)
+    cprint(msg, Colors.SUCCESS, end=end)
 
 def commentary(msg: str, end: str = '\n'):
-    colored_output(msg, 'COMMENTARY', end=end)
+    cprint(msg, Colors.COMMENTARY, end=end)
 
 def warning(msg: str, end: str = '\n'):
-    colored_output(msg, 'WARNING', "WARNING:", end=end)
+    cprint(msg, Colors.WARNING, prefix="WARNING:", end=end)
 
 def error(msg: str, end: str = '\n'):
-    colored_output(msg, 'ERROR', "\nERROR:", stream=sys.stderr, end=end)
+    cprint(msg, Colors.ERROR, prefix="\nERROR:", stream=sys.stderr, end=end)
 
 def notice(msg: str, end: str = '\n'):
-    colored_output(msg, 'NOTICE', end=end)
+    cprint(msg, Colors.NOTICE, end=end)
 
 def phase(msg: str, end: str = '\n'):
-    colored_output(msg, 'PHASE', "==>", end=end)
+    cprint(msg, Colors.PHASE, prefix="==>", end=end)
 
 def debug(msg: str, end: str = '\n'):
     if args.debug:
-        colored_output(msg, 'INFO', "DEBUG:", end=end)
+        cprint(msg, Colors.INFO, prefix="DEBUG:", end=end)
 
 # ----------------------------------------------------------------------------
 # Environment Management
@@ -912,17 +989,11 @@ def root_check():
 # Main Program
 # ----------------------------------------------------------------------------
 
-def comma_separated_to_set(alist: List[str]) -> Set[str]:
+def comma_separated_to_set(alist: str | None) -> Set[str]:
     """Parse out a comma-separated list of comments into a set of strings """
-    
-    items = set()
-
-    if alist:
-        for a in alist:
-            for arg in a.split(','):
-                items.add(arg.strip())
-
-    return items
+    if alist is None:
+        return set()
+    return {part.strip() for part in alist.split(',') if part.strip()}
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -957,7 +1028,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--force-all', action='store_true',
                         help='Force install all the packages')
     parser.add_argument("--show", action='store_true',
-                        help='Show the package list and exit')
+                        help='Lis the package names found in the package list')
+    parser.add_argument("--list", action='store_true',
+                        help='Parse and reproduce the package list on standard out')
     
     args = parser.parse_args()
 
@@ -979,7 +1052,7 @@ def parse_arguments() -> argparse.Namespace:
             'stderr': None
         }
 
-    # Validate input file
+    # Normalize input file
     args.filename = Path(args.filename).resolve()
     
 
@@ -1000,13 +1073,12 @@ def main():
   
     # Show the package list and exit
     if args.show:
-        pkgs = ""
-        for pkg in packageEntries:
-            pkgs += f"{pkg.name}, "
-        pkgs = pkgs.rstrip(', ')
-        colored_output(f"{len(packageEntries)} packages in '{args.filename}'")
-        colored_output(f"Package list:")
-        colored_output(f"{pkgs}")
+        packageEntries.show()
+        return
+    
+    # Parse and reproduce the package list and exit
+    if args.list:
+        packageEntries.list()
         return
     
     # Set up environment
@@ -1027,4 +1099,4 @@ if __name__ == '__main__':
     except Exception as e:
         if '--debug' in sys.argv:
             raise
-        bail(f"Unexpected error: {e}")
+        bail(f"Program error (--debug for stack trace): {e}")

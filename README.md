@@ -85,7 +85,7 @@ The script must be run as root unless using --dryrun mode:
 - `-n, --dryrun`: Preview changes without installing anything
 - `-p, --preserve`: Keep temporary working directory
 - `-v, --verbose`: Show subprocess output
-- '-s. --stop_on_errors`: Stop if an error is encountered
+- `-s, --stop_on_errors`: Stop if an error is encountered
 - `--debug`: Show debugging information
 - `--force-all`: Force reinstallation of all packages
 - `--only PKGS`: Only install specified packages
@@ -93,6 +93,7 @@ The script must be run as root unless using --dryrun mode:
 - `--skip PKGS`: Skip specified packages
 - `--skip-flags FLAGS`: Skip packages with specified flags
 - `--show`: Parse the package list file, print the packages found and exit
+- `--list`: Parse the package list and reproduce it on standard out
 - `--version`: Show program version
 
 ## Examples
