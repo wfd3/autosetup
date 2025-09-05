@@ -988,77 +988,77 @@ def root_check():
 # ----------------------------------------------------------------------------
 # Main Program
 # ----------------------------------------------------------------------------
+def _split_csv(s: str) -> set[str]:
+    return {p.strip() for p in s.split(",") if p.strip()}
 
-def comma_separated_to_set(alist: str | None) -> Set[str]:
-    """Parse out a comma-separated list of comments into a set of strings """
-    if alist is None:
-        return set()
-    return {part.strip() for part in alist.split(',') if part.strip()}
+class CSVSet(argparse.Action):
+    """Parse a comma-separated string into a set, merging on repeats."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, self.dest, None) or set()
+        if not isinstance(current, set):
+            current = set(current)
+        # values is a single string for each occurrence of the option
+        new_vals = _split_csv(values) if isinstance(values, str) else set(values)
+        setattr(namespace, self.dest, current | new_vals)
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments() -> tuple[argparse.Namespace, dict]:
     """Parse command line arguments."""
- 
-    global args
-
     parser = argparse.ArgumentParser(
-        description='Install packages and manage package repository dependencies',
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        description="Install packages and manage package repository dependencies",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    parser.add_argument('-n', '--dryrun', action='store_true',
-                      help='Dry run (do not actually install packages)')
-    parser.add_argument('-p', '--preserve', action='store_true',
-                      help='Preserve the temporary working directory')
-    parser.add_argument('--version', action='version',
-                      version=f'%(prog)s version {VERSION}')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Show subprocess output')
-    parser.add_argument('--debug', action='store_true', 
-                        help='Print any script source before execution')
-    parser.add_argument('filename', help='Package list file')
-    parser.add_argument('-s', '--stop_on_errors', action='store_true',
-                        help='Stop on errors')
-    parser.add_argument('--skip', nargs=1, 
-                      help=f'Do not install package these packages (comma separated)')
-    parser.add_argument('--skip-flags', nargs=1,
-                      help=f'Do not install packages with these flags (comma separated)')
-    parser.add_argument('--only-flags', nargs=1,
-                        help='Only install packages with these flags (comma separated)')
-    parser.add_argument('--only', nargs=1,
-                        help='Only install these packages (comma separated)')
-    parser.add_argument('--force-all', action='store_true',
-                        help='Force install all the packages')
-    parser.add_argument("--show", action='store_true',
-                        help='Lis the package names found in the package list')
-    parser.add_argument("--list", action='store_true',
-                        help='Parse and reproduce the package list on standard out')
+    parser.add_argument("-n", "--dryrun", action="store_true",
+                        help="Dry run (do not actually install packages)")
+    parser.add_argument("-p", "--preserve", action="store_true",
+                        help="Preserve the temporary working directory")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s version {VERSION}")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show subprocess output")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print any script source before execution")
+    parser.add_argument("-s", "--stop_on_errors", action="store_true",
+                        help="Stop on errors")
     
+    # The positional argument for the filename (last parameter, no flag)
+    parser.add_argument("filename", help="Package list file")
+
+    # Comma-separated options that can also be repeated:
+    # e.g., --only a,b --only c   -> {'a','b','c'}
+    parser.add_argument("--skip", action=CSVSet, default=set(),
+                        help="Do not install these packages (comma separated; can repeat)")
+    parser.add_argument("--skip-flags", action=CSVSet, default=set(),
+                        help="Do not install packages with these flags (comma separated; can repeat)")
+    parser.add_argument("--only-flags", action=CSVSet, default=set(),
+                        help="Only install packages with these flags (comma separated; can repeat)")
+    parser.add_argument("--only", action=CSVSet, default=set(),
+                        help="Only install these packages (comma separated; can repeat)")
+
+    parser.add_argument("--force-all", action="store_true",
+                        help="Force install all the packages")
+    parser.add_argument("--show", action="store_true",
+                        help="List the package names found in the package list")
+    parser.add_argument("--list", action="store_true",
+                        help="Parse and reproduce the package list on standard out")
+
     args = parser.parse_args()
-
-    # Parse out comma separated arguments into sets
-    args.skip       = comma_separated_to_set(args.skip)
-    args.skip_flags = comma_separated_to_set(args.skip_flags)
-    args.only_flags = comma_separated_to_set(args.only_flags)
-    args.only       = comma_separated_to_set(args.only)
-
-    # Show subprocess output?
-    global run_opts
-    run_opts = {
-        'stdout': subprocess.DEVNULL,
-        'stderr': subprocess.DEVNULL
-    }
-    if args.verbose:
-        run_opts = {
-            'stdout': None,
-            'stderr': None
-        }
 
     # Normalize input file
     args.filename = Path(args.filename).resolve()
-    
+
+    # Subprocess output control
+    run_opts = {"stdout": None, "stderr": None} if args.verbose else {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+
+    return args, run_opts    
 
 def main():
 
-    parse_arguments()
+    global args, run_opts
+    args, run_opts = parse_arguments()
 
     global installedPackages
     installedPackages = PackageDatabase()
